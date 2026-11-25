@@ -4,6 +4,111 @@ Do not use an automated game launch. The user runs the comparisons below.
 Keep the same save, camera, cache and workload for each comparison. Compare
 world-only windows; menu FPS does not establish gameplay performance.
 
+## Exact ordered comparisons (user runs these)
+
+These commands are for you to run from `A:\starport\port`, after the offline
+build. Close each run before starting the next command. Use Series X for this
+sequence; the Series S black-screen path has not been fixed. Keep the same
+save, camera and warmed shader cache, and collect at least 60 seconds in the
+same world scene. The runner records flags in each run's settings/evidence.
+This baseline deliberately disables the new optimizations; conservative dirty
+tracking off can be slower than the previously measured 1.3–1.4 FPS build.
+
+```powershell
+Set-Location A:\starport\port
+Remove-Item Env:STARPORT_SKIP_TOP_MIP -ErrorAction SilentlyContinue
+$env:STARPORT_SERIES_S = '0'
+$env:STARPORT_TELEMETRY = '1'
+$env:STARPORT_WAVE64_TRACE = '1'
+$env:STARPORT_AMBIENT_TRACE = '1'
+$env:STARPORT_WATCHDOG = '1'
+$env:STARPORT_WATCHDOG_SECONDS = '10'
+$env:STARPORT_WATCHDOG_STACKS = '0'
+$env:STARPORT_MEM_BUDGET_MB = '0'
+$env:STARPORT_MAX_RES = '0'
+$env:STARPORT_SKIP_MIPS = '0'
+$env:STARPORT_SKIP_MIPS_MIN_DIM = '1024'
+$env:STARPORT_FALLBACK_COLOR = 'black'
+$env:STARPORT_RESIDENCY = '1'
+$env:STARPORT_LEGACY_RESIDENCY = '1'
+$env:STARPORT_VRAM_TARGET_PCT = '85'
+$env:STARPORT_DIRTY_TRACKING = '0'
+$env:STARPORT_REBAR_UPLOAD = '0'
+$env:STARPORT_FRAMES_IN_FLIGHT = '1'
+
+# A: explicit legacy baseline (balanced preset held fixed throughout).
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+
+# B: same baseline + resolution ceiling.
+$env:STARPORT_MAX_RES = '1920x1080'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+
+# C: B + omit two eligible streaming mips.
+$env:STARPORT_SKIP_MIPS = '2'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+
+# D: C + missing-SRV color diagnostic. Compare the same black surfaces.
+$env:STARPORT_FALLBACK_COLOR = 'grey'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+
+# E: D + descriptor-patched reclamation.
+$env:STARPORT_LEGACY_RESIDENCY = '0'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+
+# F: E + fine buffer pages / changed texture subresources.
+$env:STARPORT_DIRTY_TRACKING = '1'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+
+# G: demand readback is DEFERRED. Keep F's readbacks; no demand flag exists.
+
+# H: F + bounded presentation flights (guest CPU outputs stay synchronous).
+$env:STARPORT_FRAMES_IN_FLIGHT = '2'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+For timing after collecting diagnostics, set both trace flags to `0`, restore
+fallback color to `black`, and repeat both sides of whichever A/B pair matters.
+Keep telemetry on. Logs are under `A:\starport\runtime\starport\runs\<stamp>`.
+Use `starport::frame` and the world-only interval, not the runner's all-frame
+summary, for median/p95 frame time. Check `STARPORT_LOG_LOSS` and sequence gaps;
+discard comparisons with missing evidence. No game run was performed by Codex.
+
+| Comparison | Check in console.log / system counters | Success signal requiring your run |
+| --- | --- | --- |
+| A → B | `starport::display`, reported mode, ambient target shape | Report/window/present ceiling <=1080p; smaller internal targets only if title honors it |
+| B → C | `starport::mips`, rebased sizes, upload/live texture bytes | Lower allocations/uploads, intact textures; metadata tests alone cannot establish all visuals |
+| C → D | `starport::fallback`, fallback writes, same black surfaces | Surface changes towards grey support a missing-albedo hypothesis |
+| D → E | evicted/patch/pinned counters, waiting categories, live bytes, local/shared DXGI memory | Actual `evicted_textures > 0`, due backlog falling, live bytes below target; patches alone are insufficient |
+| E → F | top upload entries/reasons, repeat bytes, preparing time | Fewer redundant bytes and lower preparing ms without corruption |
+| F → G | Copy-back attribution | No reduction claimed: demand paging is not implemented |
+| F → H | `frame_limit`, `frames_in_flight`, native `flights`, fence wait/copy-back phases | Bounded reuse, no stale CPU results; hazards may keep depth at one |
+| Final scene | World frame intervals and visuals | Target <=200 ms / 5+ FPS and readable skin/room; unverified offline |
+
+Optional, separate A/B pairs after H (revert each before trying the next):
+
+```powershell
+# Smaller reported pools, retaining Series X identity.
+$env:STARPORT_MEM_BUDGET_MB = '8192'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+$env:STARPORT_MEM_BUDGET_MB = '0'
+
+# Optional CPU-visible VRAM upload heaps. Can increase local VRAM pressure.
+$env:STARPORT_REBAR_UPLOAD = '1'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+$env:STARPORT_REBAR_UPLOAD = '0'
+
+# Series S hang evidence only; no claim this fixes its boot path.
+$env:STARPORT_WATCHDOG_STACKS = '1'
+.\Play-Starport.cmd --console series-s --preset balanced --ambient 0.6
+$env:STARPORT_WATCHDOG_STACKS = '0'
+```
+
+To bisect, undo only the last changed variable: MAX_RES=0, SKIP_MIPS=0,
+FALLBACK_COLOR=black, LEGACY_RESIDENCY=1, DIRTY_TRACKING=0, or
+FRAMES_IN_FLIGHT=1 respectively. RESIDENCY=0 disables both reclamation paths.
+Remove MAX_RES to use the monitor default. Removing the N and alias settings
+restores automatic mip selection. See each task below for scope and risks.
+
 ## Task 1: attribution baseline
 
 From PowerShell in the source repository:
@@ -36,8 +141,8 @@ Every roughly two seconds of presents, `console.log` includes:
 - `starport::refused` counts guarded compute *recording attempts*, not shader
   execution. Recording can precede submission; zero counts do not prove that
   all indirect dispatches are safe or implemented.
-- `ambient_hits` counts the existing indirect-term override hook. Debug-level
-  `starport::ambient` identifies its output resource. It does not establish
+- `ambient_hits` counts the existing indirect-term override hook. The separate
+  `starport::ambient` per-frame diagnostic identifies its first output binding. It does not establish
   a downstream albedo multiply or prove the diffuse composite is correct.
 
 The per-frame bucket is reset on every present; only a sample is logged.
@@ -273,4 +378,20 @@ failures remain expected; neither Wave32 forcing nor groupshared emulation is
 enabled. Binding diagnostics can add CPU work while enabled; use the kill
 switch for timing comparisons after collecting the needed evidence.
 
-Further comparisons will be added as their hazard checks are completed.
+## Task 11: ambient hook reach
+
+`STARPORT_AMBIENT_TRACE=1` defaults on; `0` disables this diagnostic independently
+of telemetry. Each presented frame logs `matched_resolves`, `override_hits`,
+the first `(shader hash, output object, format, view dimension)` tuple,
+root/table offset and current ambient level. Zero hits are explicit. Multiple
+resolve bindings count separately, but only the first binding is retained for
+the frame, keeping memory and formatting bounded. Counts describe recorded
+override work associated with a present, not GPU timestamps or a readback of
+the resulting pixels. `VICTORY_AMBIENT` / `--ambient` behavior is unchanged;
+neither the shader nor `ambient.rs` was altered by this diagnostic.
+
+`downstream_albedo_multiply="unknown"` is intentional. The override writes a
+constant indirect term to its matched UAV. This hook has no proof of the later
+bindless diffuse/albedo consumer or its multiply. Grey fallback A/B evidence
+can distinguish some missing-SRV cases, but cannot prove a working diffuse
+composite or ray tracing. Use the trace kill switch for timing once collected.

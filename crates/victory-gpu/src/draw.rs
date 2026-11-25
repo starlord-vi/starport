@@ -695,7 +695,14 @@ impl State {
             "ambient fallback resolve binding matched")
         });
         let hit = crate::ambient::raise(list, *resource as This, &view);
-        crate::telemetry::ambient(hit, *resource as u64);
+        crate::telemetry::ambient(hit);
+        crate::ambient_trace::record(
+            hit,
+            &stage.shader.hash,
+            *resource as u64,
+            view.Format.0,
+            view.ViewDimension.0,
+        );
         hit
     }
 

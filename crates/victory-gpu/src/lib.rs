@@ -17,6 +17,7 @@
 
 #[cfg(windows)]
 mod ambient;
+mod ambient_trace;
 #[cfg(windows)]
 mod binding_trace;
 #[cfg(all(windows, feature = "diagnostics"))]

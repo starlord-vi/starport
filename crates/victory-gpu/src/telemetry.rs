@@ -186,19 +186,18 @@ pub(crate) fn refused(hash: &str, indirect: bool) {
     }
 }
 
-pub(crate) fn ambient(hit: bool, guest: u64) {
+pub(crate) fn ambient(hit: bool) {
     if enabled() && hit {
         STATE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .frame
             .ambient_hits += 1;
-        tracing::debug!(target: "starport::ambient", frame=crate::frame::current(), resource=guest,
-            "constant indirect term written; downstream diffuse/albedo multiplication not established by this hook");
     }
 }
 
 pub(crate) fn present(flights: usize, pending_frames: usize) {
+    crate::ambient_trace::present();
     if !enabled() {
         return;
     }
