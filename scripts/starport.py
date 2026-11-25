@@ -102,8 +102,9 @@ def main():
     parser.add_argument('--console', choices=('series-x', 'series-s'),
                         default='series-s' if os.environ.get('STARPORT_SERIES_S') == '1' else 'series-x')
     parser.add_argument('--skip-top-mip', action=argparse.BooleanOptionalAction,
-                        default=os.environ.get('STARPORT_SKIP_TOP_MIP') == '1',
-                        help='Omit mip 0 of large CPU-streamed textures; opt-in VRAM safety valve')
+                        default=None,
+                        help='Compatibility alias for --skip-mips 1; --no-skip-top-mip means 0')
+    parser.add_argument('--skip-mips', type=int, choices=range(13), help='Omit N top streaming mips; 0 disables; default automatic')
     parser.add_argument('--capture', action='store_true', help='Diagnostic PNG captures; perturbs timings')
     parser.add_argument('--capture-every', type=int, help='Dense native captures every N presents; requires --capture')
     parser.add_argument('--data', type=Path, help='Separate test profile; existing saves are preserved')
@@ -114,6 +115,13 @@ def main():
     parser.add_argument('--bvh', action='store_true', help='Diagnostic RT builder attempt; incomplete upstream')
     parser.add_argument('--strict-waits', action='store_true', help='Keep unresolved queue waits; never force at present')
     args = parser.parse_args()
+    mip_override = args.skip_mips
+    if mip_override is None and args.skip_top_mip is not None:
+        mip_override = int(args.skip_top_mip)
+    if mip_override is None:
+        mip_override = os.environ.get('STARPORT_SKIP_MIPS')
+    if mip_override is None and os.environ.get('STARPORT_SKIP_TOP_MIP') in ('0', '1'):
+        mip_override = os.environ['STARPORT_SKIP_TOP_MIP']
     if not 0 <= args.seconds <= 86400:
         parser.error('--seconds must be 0 (until you close the game) or 1..86400')
     try:
@@ -144,7 +152,6 @@ def main():
         'STARPORT_TELEMETRY': os.environ.get('STARPORT_TELEMETRY', '1'),
         'STARPORT_MAX_RES': os.environ.get('STARPORT_MAX_RES', ''),
         'STARPORT_SERIES_S': '1' if args.console == 'series-s' else '0',
-        'STARPORT_SKIP_TOP_MIP': '1' if args.skip_top_mip else '0',
         'VICTORY_AMBIENT': args.ambient,
         'VICTORY_MATERIAL_DEPTH': args.material_depth,
         'VICTORY_INPUT': 'keyboard-mouse',
@@ -154,6 +161,10 @@ def main():
         'VICTORY_DXIL': str(root/'compat'/'tools_bin'/'dxc-1.9.2609'/'bin'/'x64'/'dxil.dll'),
         'VICTORY_PC_DXC': str(root/'compat'/'tools_bin'/'dxc-1.9.2609'/'bin'/'x64'/'dxc.exe'),
     }
+    if mip_override is not None:
+        settings['STARPORT_SKIP_MIPS'] = str(mip_override)
+    if 'STARPORT_SKIP_MIPS_MIN_DIM' in os.environ:
+        settings['STARPORT_SKIP_MIPS_MIN_DIM'] = os.environ['STARPORT_SKIP_MIPS_MIN_DIM']
     if args.preset != 'baseline':
         settings.update(VICTORY_TEXTURE_NO_WAIT='1', VICTORY_JOIN_COPIES='1', VICTORY_WIDE_REFRESH='1')
     if args.preset == 'throughput':

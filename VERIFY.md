@@ -64,4 +64,31 @@ settles outstanding flights and releases cached back-buffer references.
 The blit preserves the full image because [D3D12 CopyResource requires matching
 dimensions and does not stretch](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-copyresource).
 
+## Task 3: streaming mip selection
+
+Use `--skip-mips 0` in the baseline, then `--skip-mips 2`. The new ceiling and
+all other settings must stay fixed during that comparison. The equivalent
+environment variable is `STARPORT_SKIP_MIPS=0..12`; `0` is the kill switch.
+Unset defaults to 2 when the display ceiling is at most 1920x1080, otherwise
+0. `STARPORT_SKIP_MIPS_MIN_DIM` defaults to 1024. Only synthetic, placed,
+non-MSAA BC 2D textures/arrays/cubes with CPU-owned contents qualify; actual
+title resources and GPU-written outputs keep their allocation. At least three
+mips remain, even if N exceeds the available chain.
+
+`STARPORT_SKIP_TOP_MIP=1` and `--skip-top-mip` remain aliases for N=1; their
+`0`/`--no-skip-top-mip` forms disable omission. Explicit `--skip-mips` wins,
+then an explicit CLI alias, then the N environment setting, then the alias
+environment setting, then automatic selection. The launcher no longer inserts
+an implicit `STARPORT_SKIP_TOP_MIP=0`, which would mask the new default.
+
+Check `starport::mips` for chosen N/threshold and `mip_rebase_bytes` plus host
+dimensions in `starport::resource`. Source array strides remain unchanged;
+uploads choose source mip `host_mip+N`. Typed GetDimensions uses the rebased
+host SRV, while size-only descriptor reads use the same retained range in the
+metadata sidecar. Array/cube layer counts remain unchanged. No shader bytecode
+is patched to pretend unsupported descriptor fields exist; unsupported reads
+still report a translation failure. A unit test checks metadata at N=2 and
+tail preservation. This does not establish correctness of every title shader's
+hard-coded texel coordinates; compare visuals in the same world scene.
+
 Further comparisons will be added as their hazard checks are completed.

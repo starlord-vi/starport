@@ -1607,21 +1607,57 @@ impl HostTexture {
 /// objects and uncompressed aliases of GPU-written targets stay exact.
 #[cfg(windows)]
 fn streaming_first_mip(desc: &ResourceDesc, placed: bool) -> u32 {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on =
-        *ON.get_or_init(|| std::env::var_os("STARPORT_SKIP_TOP_MIP").is_some_and(|v| v == "1"));
-    u32::from(skip_streaming_mip(desc, placed, on))
+    static POLICY: std::sync::OnceLock<(u32, u64)> = std::sync::OnceLock::new();
+    let (count, minimum) = *POLICY.get_or_init(|| {
+        let default = if crate::display::limit().is_some_and(|(w, h)| w <= 1920 && h <= 1080) {
+            2
+        } else {
+            0
+        };
+        let count = match std::env::var("STARPORT_SKIP_MIPS") {
+            Ok(value) => match value.parse::<u32>() {
+                Ok(n) if n <= 12 => n,
+                _ => {
+                    tracing::warn!(value, "invalid STARPORT_SKIP_MIPS; disabling mip omission");
+                    0
+                }
+            },
+            Err(_) => match std::env::var("STARPORT_SKIP_TOP_MIP").as_deref() {
+                Ok("1") => 1,
+                Ok("0") => 0,
+                _ => default,
+            },
+        };
+        let minimum = std::env::var("STARPORT_SKIP_MIPS_MIN_DIM")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| (16..=16384).contains(n))
+            .unwrap_or(1024);
+        tracing::info!(target:"starport::mips",count,minimum,retained_mips=3,
+            "streaming mip policy; STARPORT_SKIP_MIPS=0 disables");
+        (count, minimum)
+    });
+    streaming_mips(desc, placed, count, minimum)
 }
 
 #[cfg(windows)]
-fn skip_streaming_mip(desc: &ResourceDesc, placed: bool, on: bool) -> bool {
-    on && placed
+fn streaming_mips(desc: &ResourceDesc, placed: bool, count: u32, minimum: u64) -> u32 {
+    let eligible = placed
         && fills(desc)
         && desc.dimension == 3
         && desc.sample_count == 1
-        && desc.mip_levels != 1
-        && desc.width.max(u64::from(desc.height)) >= 2048
-        && matches!(pc_format(desc.format), 70..=84 | 94..=99)
+        && desc.width.max(u64::from(desc.height)) >= minimum
+        && matches!(pc_format(desc.format), 70..=84 | 94..=99);
+    if eligible {
+        count.min(mip_count(desc).saturating_sub(3))
+    } else {
+        0
+    }
+}
+
+#[cfg(all(windows, test))]
+fn skip_streaming_mip(desc: &ResourceDesc, placed: bool, on: bool) -> bool {
+    streaming_mips(desc, placed, u32::from(on), 2048) > 0
 }
 
 #[cfg(windows)]
@@ -2456,6 +2492,34 @@ mod tests {
             layout: 0,
             ..buffer(0)
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn multi_mip_policy_leaves_a_tail_and_metadata_matches_the_retained_view() {
+        let mut desc = texture(1024, 512, 71, 11);
+        desc.depth_or_array_size = 6;
+        assert_eq!(streaming_mips(&desc, true, 2, 1024), 2);
+        assert_eq!(streaming_mips(&desc, true, 12, 1024), 8);
+        assert_eq!(streaming_mips(&desc, true, 0, 1024), 0);
+        assert_eq!(streaming_mips(&desc, true, 2, 2048), 0);
+        assert_eq!(streaming_mips(&desc, false, 2, 1024), 0);
+        let mut view = [0; 10];
+        view[1] = 5;
+        view[4] = 1;
+        view[5] = 4;
+        view[7] = 6;
+        let [a, b, c, d] = texture_size_words(&desc, Some(&view), 2).unwrap();
+        assert_eq!((a >> 30 | (b & 0x3fff) << 2) + 1, 256);
+        assert_eq!((b >> 14 & 0x3fff) + 1, 128);
+        assert_eq!((c >> 16 & 0xf) + 1, 3);
+        assert_eq!(d + 1, 6);
+        desc.mip_levels = 3;
+        assert_eq!(streaming_mips(&desc, true, 12, 1024), 0);
+        desc.mip_levels = 0;
+        assert_eq!(streaming_mips(&desc, true, 12, 1024), 8);
+        desc.flags = 4;
+        assert_eq!(streaming_mips(&desc, true, 2, 1024), 0);
     }
 
     #[cfg(windows)]

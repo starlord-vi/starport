@@ -56,8 +56,11 @@ game and records lightweight diagnostics. Explicit options override the profile:
 ```
 
 `STARPORT_SERIES_S=0|1` changes the launcher's default console profile;
-`STARPORT_SKIP_TOP_MIP=0|1` controls the opt-in texture memory safety valve
-(default `0`). The title chooses resolution and texture pools from the console
+`STARPORT_SKIP_MIPS=0..12` controls streaming mip omission (automatic default:
+2 at a display ceiling <=1080p, otherwise 0; at least 3 mips remain).
+`STARPORT_SKIP_TOP_MIP=0|1` remains an explicit alias for N=0|1.
+See [the ordered verification guide](VERIFY.md) for kill switches and comparisons.
+The title chooses resolution and texture pools from the console
 profile; the spoof does not force a particular resolution. Override `--game`,
 `--assets`, `--backend` and `--state` for another layout. Direct Python use
 (`python scripts\starport.py --seconds 0 --console series-s`) also works;
