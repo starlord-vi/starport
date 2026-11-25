@@ -167,7 +167,7 @@ def main():
     if 'STARPORT_SKIP_MIPS_MIN_DIM' in os.environ:
         settings['STARPORT_SKIP_MIPS_MIN_DIM'] = os.environ['STARPORT_SKIP_MIPS_MIN_DIM']
     for name in ('STARPORT_RESIDENCY', 'STARPORT_LEGACY_RESIDENCY', 'STARPORT_VRAM_TARGET_PCT',
-                 'STARPORT_DIRTY_TRACKING', 'STARPORT_REBAR_UPLOAD'):
+                 'STARPORT_DIRTY_TRACKING', 'STARPORT_REBAR_UPLOAD', 'STARPORT_FRAMES_IN_FLIGHT'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':

@@ -198,7 +198,7 @@ pub(crate) fn ambient(hit: bool, guest: u64) {
     }
 }
 
-pub(crate) fn present(flights: usize) {
+pub(crate) fn present(flights: usize, pending_frames: usize) {
     if !enabled() {
         return;
     }
@@ -214,7 +214,7 @@ pub(crate) fn present(flights: usize) {
     let (total, unique) = (state.total, state.unique);
     drop(state);
     tracing::info!(target: "starport::telemetry", sample_frame=crate::frame::current(), frames_since_log=frames,
-        preparing_us=phases[0], cpu_fence_wait_us=phases[1], copy_back_us=phases[2], flights,
+        preparing_us=phases[0], cpu_fence_wait_us=phases[1], copy_back_us=phases[2], flights, frames_in_flight=pending_frames, frame_limit=crate::frames::limit(),
         cumulative_upload_bytes=total, cumulative_unique_allocation_bytes=unique,
         cumulative_repeat_bytes=total.saturating_sub(unique), first_upload_bytes=frame.reasons[0],
         dirty_reupload_bytes=frame.reasons[1], mip_rebase_bytes=frame.reasons[2], demotion_reupload_bytes=frame.reasons[3],

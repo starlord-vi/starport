@@ -1829,6 +1829,9 @@ pub(crate) fn late() -> bool {
 fn late_stage() -> u8 {
     static STAGE: OnceLock<u8> = OnceLock::new();
     *STAGE.get_or_init(|| {
+        if crate::frames::limit() == 1 {
+            return 0;
+        }
         if std::env::var_os("VICTORY_GPU_TIMING").is_some() {
             return 0;
         }
@@ -3967,6 +3970,22 @@ impl Host {
     /// for reuse then, as a queue does for the lists it ran.
     pub(crate) fn execute_late(&self, lists: Vec<crate::list::Detached>, order: Vec<usize>) {
         if order.is_empty() {
+            crate::list::recycle(lists, &order);
+            return;
+        }
+        let synchronous = order.iter().any(|&i| {
+            let deferred = lists[i].host().deferred();
+            !deferred.backs.is_empty()
+                || deferred
+                    .copies
+                    .iter()
+                    .any(|s| matches!(s, Step::GpuWrite(..) | Step::Run(_)))
+        });
+        if synchronous {
+            // Native guest CPU reads cannot yet be trapped. Preserve their
+            // copy-back completion boundary, including earlier queue work.
+            let runs: Vec<_> = order.iter().map(|&i| lists[i].host()).collect();
+            self.execute(&runs);
             crate::list::recycle(lists, &order);
             return;
         }
@@ -6236,6 +6255,37 @@ impl Host {
 mod upload_tests {
     use super::*;
     #[test]
+    fn owned_async_copies_land_in_order_before_cpu_observation() {
+        let h = host().unwrap();
+        let mut work = Vec::new();
+        for value in [17u8, 42, 93] {
+            let (source, data) = h.upload_buffer(256).unwrap();
+            let read = h.read_back_buffer(256).unwrap();
+            let list = h.new_list().unwrap();
+            // SAFETY: private resources retained through the settle.
+            unsafe {
+                data.write_bytes(value, 256);
+                list.list.CopyBufferRegion(&read, 0, &source, 0, 256);
+            }
+            list.close();
+            let submission = h.execute_own(&list);
+            work.push((list, source, read, value, submission));
+        }
+        settle_now(WHY_SYNC);
+        for (_, _, read, value, submission) in &work {
+            assert!(*submission <= finished_submission());
+            unsafe {
+                let mut data = std::ptr::null_mut();
+                read.Map(0, None, Some(&mut data)).unwrap();
+                assert_eq!(
+                    std::slice::from_raw_parts(data.cast::<u8>(), 256),
+                    [*value; 256]
+                );
+                read.Unmap(0, None);
+            }
+        }
+    }
+    #[test]
     fn selected_upload_heap_reaches_a_gpu_copy_and_readback() {
         let h = host().unwrap();
         let (source, data) = h.upload_buffer(256).unwrap();
@@ -6333,13 +6383,13 @@ impl Meter {
     }
 
     /// Counts a presented frame.
-    fn frame(&mut self, hwnd: HWND) {
+    fn frame(&mut self, hwnd: HWND, pending_frames: usize) {
         let flights = line()
             .line
             .iter()
             .filter(|f| matches!(f, Late::Run(_)))
             .count();
-        crate::telemetry::present(flights);
+        crate::telemetry::present(flights, pending_frames);
         static RECORD: OnceLock<bool> = OnceLock::new();
         if *RECORD.get_or_init(|| std::env::var_os("STARPORT_RECORD").is_some_and(|v| v == "1")) {
             let now = std::time::Instant::now();
@@ -6661,16 +6711,29 @@ impl Host {
             #[cfg(not(feature = "diagnostics"))]
             let read_now = false;
             let slot = if late_free_present() && !read_now {
-                let finished = FINISHED.load(Ordering::Acquire);
-                p.ahead
-                    .iter()
-                    .position(|(_, flown)| *flown <= finished)
-                    .or_else(|| {
-                        let list = self.new_list().ok()?;
-                        list.close();
-                        p.ahead.push((list, 0));
-                        Some(p.ahead.len() - 1)
-                    })
+                loop {
+                    let fences: Vec<_> = p.ahead.iter().map(|(_, f)| *f).collect();
+                    match crate::frames::slot(
+                        &fences,
+                        FINISHED.load(Ordering::Acquire),
+                        crate::frames::limit(),
+                    ) {
+                        crate::frames::Slot::Reuse(i) => break Some(i),
+                        crate::frames::Slot::Grow => {
+                            let list = self.new_list().ok()?;
+                            list.close();
+                            p.ahead.push((list, 0));
+                            break Some(p.ahead.len() - 1);
+                        }
+                        crate::frames::Slot::Wait(fence) => {
+                            if relay() {
+                                relay_wait(WHY_MOST, |_| FINISHED.load(Ordering::Acquire) >= fence);
+                            } else {
+                                settle_now(WHY_MOST);
+                            }
+                        }
+                    }
+                }
             } else {
                 None
             };
@@ -6737,7 +6800,12 @@ impl Host {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
             }
             let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
-            p.meter.frame(p.hwnd);
+            let pending = p
+                .ahead
+                .iter()
+                .filter(|(_, f)| *f > FINISHED.load(Ordering::Acquire))
+                .count();
+            p.meter.frame(p.hwnd, pending);
             #[cfg(feature = "diagnostics")]
             return Some(probe.is_some_and(|b| crate::capture::black(&b)));
             #[cfg(not(feature = "diagnostics"))]

@@ -33,6 +33,8 @@ mod fallback;
 pub mod fence;
 pub mod frame;
 #[cfg(windows)]
+mod frames;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod indirect;

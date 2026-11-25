@@ -206,4 +206,28 @@ but cannot prove that an unobserved native guest CPU read never happens.
 See [the read-barrier requirements](docs/demand-readback.md). No lower
 copy-back byte count or demand-paging correctness is claimed from this task.
 
+## Task 8: bounded presentation flights
+
+Use `STARPORT_FRAMES_IN_FLIGHT=1` through the preceding comparisons, then
+compare `2` (new default; accepted range 1..4). One forces synchronous legacy
+submission even if older relay preset flags are set. The new path reuses the
+inherited queue, fences and landing worker. Presentation slots cannot grow
+beyond N and are reused only after their completion/landing watermark. Resize
+settles flights and releases retained swapchain resources first.
+
+This is deliberately limited: submissions with guest buffer shader outputs,
+explicit CPU texture readbacks or unknown host callbacks still complete
+synchronously. Without task 7's CPU read barriers, deferring those copy-backs
+would expose stale native CPU reads. Pure output/presentation work can fly;
+the single direct queue retains GPU ordering. A separate copy queue is not
+introduced for aliasing resources without proven cross-queue hazards.
+
+Check `frame_limit`, `frames_in_flight` (pending presented frames) and `flights`
+(submission flights, a different count) in telemetry. Seeing fewer than N
+frames pending is normal under hazards, diagnostics/captures, queue pressure or
+a slow CPU. This does not promise fully parallel preparing/wait/copy-back for
+the world's large shader-written buffers. Unit tests cover bounded slot reuse;
+a headless GPU test sends owned copies asynchronously and checks their bytes
+only after ordered completion. The movie regression remains passing.
+
 Further comparisons will be added as their hazard checks are completed.

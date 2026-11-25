@@ -575,7 +575,12 @@ mod card_tests {
 pub(crate) fn relay() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("VICTORY_RELAY").is_ok_and(|v| v == "1" || v == "2") && !keeps()
+        crate::frames::limit() > 1
+            && !keeps()
+            && match std::env::var("VICTORY_RELAY") {
+                Ok(v) => v == "1" || v == "2",
+                Err(_) => true,
+            }
     })
 }
 
