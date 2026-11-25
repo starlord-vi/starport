@@ -91,4 +91,30 @@ still report a translation failure. A unit test checks metadata at N=2 and
 tail preservation. This does not establish correctness of every title shader's
 hard-coded texel coordinates; compare visuals in the same world scene.
 
+## Task 4: missing-texture colors
+
+Hold the preceding settings fixed; set `$env:STARPORT_FALLBACK_COLOR = 'grey'`
+(also `magenta`, `white`, or `black`). Default/kill switch `black` preserves
+the old typed null behavior. The runner forwards this setting. Watch
+`starport::fallback` and `cumulative_fallback_descriptor_writes` in each
+telemetry sample. If a previously black surface changes to the diagnostic
+color, that supports a missing-SRV hypothesis for that surface. It does not
+prove the later lighting composite or RT is correct.
+
+Only missing/waiting SRVs with a known valid texture dimension are colored.
+Buffers, UAV writes, invalid array counts and MSAA views lacking their sample
+count keep typed nulls; redirecting UAV writes into a shared debug texture
+would introduce data races. Float, uint and sint SRVs use compatible numeric
+formats; integer grey is converted to that integer format. Normalized sampling
+gets a constant, but out-of-bounds integer texel loads can still read zero.
+The small immutable fallback cache is capped at 64 shape/format variants;
+unsupported cases log a warning and retain a typed null. Initializing it uses
+a private queue/fence so descriptor publication cannot recursively acquire the
+normal submission lock. GPU readback tests verify grey/magenta/white texels.
+
+Actual draws *sampling* an indexed fallback cannot be counted by knowing that
+a heap contains one: bindless indices are selected in shaders. No misleading
+sample counter is emitted. The descriptor-write counter is cumulative and
+does not represent live missing slots or sampled draws.
+
 Further comparisons will be added as their hazard checks are completed.

@@ -2472,6 +2472,9 @@ fn null_like(words: &[u32; 10], at: D3D12_CPU_DESCRIPTOR_HANDLE) {
     }
     let mut desc = srv_desc(&w);
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if crate::fallback::write(srv_desc(words), at) {
+        return;
+    }
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     // SAFETY: a slot of our heap; a null resource is allowed with a desc.
     unsafe {
@@ -2497,6 +2500,9 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
             },
         },
     };
+    if crate::fallback::write(desc, at) {
+        return;
+    }
     // SAFETY: a slot of our heap; a null resource is allowed with a desc.
     unsafe {
         host.device

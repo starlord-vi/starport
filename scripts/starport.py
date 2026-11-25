@@ -150,6 +150,7 @@ def main():
         'VICTORY_LOG': 'info',
         'STARPORT_RECORD': '1',
         'STARPORT_TELEMETRY': os.environ.get('STARPORT_TELEMETRY', '1'),
+        'STARPORT_FALLBACK_COLOR': os.environ.get('STARPORT_FALLBACK_COLOR', 'black'),
         'STARPORT_MAX_RES': os.environ.get('STARPORT_MAX_RES', ''),
         'STARPORT_SERIES_S': '1' if args.console == 'series-s' else '0',
         'VICTORY_AMBIENT': args.ambient,

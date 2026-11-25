@@ -222,6 +222,7 @@ pub(crate) fn present(flights: usize) {
         live_texture_bytes=crate::resource::HOST_TEXTURES[1].load(Relaxed),
         waiting_texture_slots=crate::draw::HEAP_TEXTURES_WAITING.load(Relaxed),
         evicted_textures=crate::residency::counters()[0], patched_descriptors=crate::descriptor::host::patched_count(),
+        cumulative_fallback_descriptor_writes=crate::fallback::writes(),
         "sampled presented-frame attribution; phases are CPU wall times, recording may precede submission");
     for back in [false, true] {
         let mut resources: Vec<_> = frame

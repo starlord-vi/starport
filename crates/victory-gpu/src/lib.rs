@@ -28,6 +28,8 @@ pub mod display;
 #[cfg(windows)]
 mod draw;
 pub mod dxgi;
+#[cfg(windows)]
+mod fallback;
 pub mod fence;
 pub mod frame;
 #[cfg(windows)]
