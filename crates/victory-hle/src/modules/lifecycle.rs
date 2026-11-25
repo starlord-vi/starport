@@ -120,9 +120,15 @@ fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32,
     // SAFETY: `area` receives the primary monitor's work area.
     let known =
         unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) };
-    let fitted = fit_into(&area, width, height);
+    let bounded = if parent.is_null() && width > 0 && height > 0 {
+        let (w, h) = victory_gpu::display::clamp((width as u32, height as u32));
+        (w as i32, h as i32)
+    } else {
+        (width, height)
+    };
+    let fitted = fit_into(&area, bounded.0, bounded.1);
     if !parent.is_null() || known == 0 || fitted == (width, height) {
-        return (x, y, width, height);
+        return (x, y, bounded.0, bounded.1);
     }
     tracing::info!(width, height, to = ?fitted, "title window fitted to the screen");
     let (w, h) = fitted;
@@ -195,7 +201,17 @@ extern "system" fn window_proc(
             wm::RemovePropW(hwnd, TITLE_PROC);
         }
         let title = std::mem::transmute::<*mut c_void, wm::WNDPROC>(title);
-        wm::CallWindowProcW(title, hwnd, message, wparam, lparam)
+        let result = wm::CallWindowProcW(title, hwnd, message, wparam, lparam);
+        if message == wm::WM_WINDOWPOSCHANGING && lparam != 0 {
+            // The title procedure has had its chance to adjust the proposal.
+            let position = &mut *(lparam as *mut wm::WINDOWPOS);
+            if position.flags & wm::SWP_NOSIZE == 0 && position.cx > 0 && position.cy > 0 {
+                let (w, h) = victory_gpu::display::clamp((position.cx as u32, position.cy as u32));
+                position.cx = w as i32;
+                position.cy = h as i32;
+            }
+        }
+        result
     }
 }
 

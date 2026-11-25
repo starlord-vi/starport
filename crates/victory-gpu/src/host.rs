@@ -6524,7 +6524,19 @@ impl Host {
             tracing::warn!(format = desc.Format.0, "cannot present this format");
             return None;
         };
-        let (width, height) = (desc.Width as u32, desc.Height);
+        let source_size = (desc.Width as u32, desc.Height);
+        let (width, height) = crate::display::clamp(source_size);
+        let scaled = (width, height) != source_size;
+        let source_read = if scaled {
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+        } else {
+            D3D12_RESOURCE_STATE_COPY_SOURCE
+        };
+        let output_write = if scaled {
+            D3D12_RESOURCE_STATE_RENDER_TARGET
+        } else {
+            D3D12_RESOURCE_STATE_COPY_DEST
+        };
         let mut presenter = self.presenter.lock().unwrap_or_else(|e| e.into_inner());
         if presenter.is_none() {
             *presenter = match self.presenter(width, height, format) {
@@ -6539,6 +6551,12 @@ impl Host {
         if (p.width, p.height, p.format) != (width, height, format) {
             // Presents sent ahead hold back buffers until they have run.
             settle_now(WHY_SYNC);
+            p.copy.reset();
+            p.copy.close();
+            for (copy, _) in &p.ahead {
+                copy.reset();
+                copy.close();
+            }
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
@@ -6587,14 +6605,33 @@ impl Host {
             copy.reset();
             let list = &copy.list;
             list.ResourceBarrier(&[
-                transition(texture, state, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                transition(
-                    &back,
-                    D3D12_RESOURCE_STATE_PRESENT,
-                    D3D12_RESOURCE_STATE_COPY_DEST,
-                ),
+                transition(texture, state, source_read),
+                transition(&back, D3D12_RESOURCE_STATE_PRESENT, output_write),
             ]);
-            list.CopyResource(&back, texture);
+            if scaled {
+                if let Err(error) = crate::present_blit::record(
+                    copy,
+                    &self.device,
+                    texture,
+                    &back,
+                    format,
+                    (width, height),
+                ) {
+                    tracing::error!(%error, ?source_size, width, height, "clamped presentation blit failed");
+                    copy.close();
+                    return None;
+                }
+                if source_read != D3D12_RESOURCE_STATE_COPY_SOURCE {
+                    list.ResourceBarrier(&[transition(
+                        texture,
+                        source_read,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    )]);
+                }
+            } else {
+                list.CopyResource(&back, texture);
+                copy.keep(texture);
+            }
             #[cfg(feature = "diagnostics")]
             let capture = crate::capture::wanted(frame)
                 .then(|| crate::capture::read_back(&self.device, list, texture))
@@ -6609,11 +6646,7 @@ impl Host {
             let _ = frame;
             list.ResourceBarrier(&[
                 transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE, state),
-                transition(
-                    &back,
-                    D3D12_RESOURCE_STATE_COPY_DEST,
-                    D3D12_RESOURCE_STATE_PRESENT,
-                ),
+                transition(&back, output_write, D3D12_RESOURCE_STATE_PRESENT),
             ]);
             copy.close();
             match slot {
@@ -6981,7 +7014,18 @@ extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     // SAFETY: the default handling for our window.
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    unsafe {
+        let result = DefWindowProcW(hwnd, message, wparam, lparam);
+        if message == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
+            let p = &mut *(lparam.0 as *mut WINDOWPOS);
+            if p.flags.0 & SWP_NOSIZE.0 == 0 && p.cx > 0 && p.cy > 0 {
+                let (w, h) = crate::display::clamp((p.cx as u32, p.cy as u32));
+                p.cx = w as i32;
+                p.cy = h as i32;
+            }
+        }
+        result
+    }
 }
 
 fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
@@ -7005,6 +7049,10 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             bottom: height as i32,
         };
         AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
+        let outer = crate::display::clamp((
+            (rect.right - rect.left) as u32,
+            (rect.bottom - rect.top) as u32,
+        ));
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
@@ -7012,8 +7060,8 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
+            outer.0 as i32,
+            outer.1 as i32,
             None,
             None,
             Some(instance.into()),

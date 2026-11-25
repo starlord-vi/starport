@@ -24,6 +24,7 @@ pub mod console;
 mod copystat;
 pub mod descriptor;
 pub mod device;
+pub mod display;
 #[cfg(windows)]
 mod draw;
 pub mod dxgi;
@@ -40,6 +41,8 @@ pub mod list;
 mod memory;
 pub mod object;
 pub mod pipeline;
+#[cfg(windows)]
+mod present_blit;
 #[cfg(windows)]
 mod primitive;
 pub mod query;

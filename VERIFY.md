@@ -44,5 +44,24 @@ The per-frame bucket is reset on every present; only a sample is logged.
 Phase measurements are CPU wall time, including fence waits, not GPU execution
 timestamps. The existing log-loss counters must remain zero for comparisons.
 
-Further task switches and controlled comparisons will be documented here as
-their implementations and hazard checks are completed.
+## Task 2: resolution
+
+Set `$env:STARPORT_MAX_RES = '0'` for the legacy uncapped baseline, then
+`$env:STARPORT_MAX_RES = '1920x1080'` for the ceiling comparison. Removing
+the variable selects the primary monitor's current mode. The runner forwards
+this setting. Check `starport::display`, `display mode reported to the title`
+and `presenting to a window`: reported/enumerated mode, top-level window
+proposals and swapchain buffers are bounded. Oversized output is GPU-scaled,
+not cropped or copied into an incompatible resource. Source render targets
+remain title-owned: a smaller reported display does not prove the title
+actually chooses smaller internal targets. Look for ambient target dimensions
+and live-memory reductions in the user-run logs before claiming that effect.
+
+The downscaler's shaders/PSOs compile offline. A synthetic four-quadrant test
+checks actual GPU output, at two scale factors. Each scaled
+present owns its descriptors until completion; resize first
+settles outstanding flights and releases cached back-buffer references.
+The blit preserves the full image because [D3D12 CopyResource requires matching
+dimensions and does not stretch](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-copyresource).
+
+Further comparisons will be added as their hazard checks are completed.
