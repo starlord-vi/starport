@@ -94,9 +94,11 @@ impl Host {
                 if let Some(made) = &device {
                     let factory: IDXGIFactory4 =
                         CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(err)?;
-                    if let Ok(adapter) = factory.EnumAdapterByLuid::<IDXGIAdapter1>(made.GetAdapterLuid())
+                    if let Ok(adapter) =
+                        factory.EnumAdapterByLuid::<IDXGIAdapter1>(made.GetAdapterLuid())
                         && let Ok(desc) = adapter.GetDesc1()
-                        && (desc.Flags & 2 != 0 || (desc.VendorId == 0x1414 && desc.DeviceId == 0x8c))
+                        && (desc.Flags & 2 != 0
+                            || (desc.VendorId == 0x1414 && desc.DeviceId == 0x8c))
                     {
                         return Err("the default device is the software adapter".to_owned());
                     }
@@ -280,7 +282,10 @@ impl Host {
                 let message = buffer.as_mut_ptr().cast::<D3D12_MESSAGE>();
                 if queue.GetMessage(i, Some(message), &mut len).is_ok() {
                     let m = &*message;
-                    let bytes = std::slice::from_raw_parts(m.pDescription, m.DescriptionByteLength.saturating_sub(1));
+                    let bytes = std::slice::from_raw_parts(
+                        m.pDescription,
+                        m.DescriptionByteLength.saturating_sub(1),
+                    );
                     text.push_str(" | ");
                     text.push_str(&String::from_utf8_lossy(bytes));
                 }
@@ -353,9 +358,11 @@ impl Host {
                 pShaderBytecode: ps.as_ptr().cast(),
                 BytecodeLength: ps.len(),
             },
-            GS: gs.map_or(D3D12_SHADER_BYTECODE::default(), |gs| D3D12_SHADER_BYTECODE {
-                pShaderBytecode: gs.as_ptr().cast(),
-                BytecodeLength: gs.len(),
+            GS: gs.map_or(D3D12_SHADER_BYTECODE::default(), |gs| {
+                D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: gs.as_ptr().cast(),
+                    BytecodeLength: gs.len(),
+                }
             }),
             SampleMask: u32::MAX,
             RasterizerState: D3D12_RASTERIZER_DESC {

@@ -268,7 +268,9 @@ extern "system" fn find_for_device(_: This, device: *const c_void, out: *mut Han
     }
     // SAFETY: the API takes one 32-byte APP_LOCAL_DEVICE_ID and an output handle.
     let local = super::gameinput::local_device(unsafe { &*device.cast::<[u8; 32]>() });
-    unsafe { out.write(std::ptr::null()); }
+    unsafe {
+        out.write(std::ptr::null());
+    }
     tracing::debug!(local, "find user for input device");
     found(local, out)
 }
@@ -341,12 +343,21 @@ mod tests {
         id[..7].copy_from_slice(b"victory");
         id[31] = 6; // The hub's always-connected keyboard.
         let mut handle = std::ptr::null();
-        assert_eq!(find_for_device(&DEVICE_OBJECT, id.as_ptr().cast(), &mut handle), S_OK);
+        assert_eq!(
+            find_for_device(&DEVICE_OBJECT, id.as_ptr().cast(), &mut handle),
+            S_OK
+        );
         assert_eq!(handle, user());
         id[0] ^= 1;
-        assert_eq!(find_for_device(&DEVICE_OBJECT, id.as_ptr().cast(), &mut handle), USER_NOT_FOUND);
+        assert_eq!(
+            find_for_device(&DEVICE_OBJECT, id.as_ptr().cast(), &mut handle),
+            USER_NOT_FOUND
+        );
         assert!(handle.is_null());
-        assert_eq!(find_for_device(&DEVICE_OBJECT, std::ptr::null(), &mut handle), super::super::xasync::E_INVALIDARG);
+        assert_eq!(
+            find_for_device(&DEVICE_OBJECT, std::ptr::null(), &mut handle),
+            super::super::xasync::E_INVALIDARG
+        );
     }
 
     #[test]

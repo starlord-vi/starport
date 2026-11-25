@@ -48,7 +48,13 @@ impl Pending {
             key.update(s.stage.as_bytes());
             key.update(s.hash.as_bytes());
         }
-        key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
+        key.update(
+            graphics
+                .as_ref()
+                .map(|g| g.describe())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         Pending {
             shaders,
             graphics,
@@ -191,7 +197,10 @@ fn wait(p: &Pending, frame: u64) {
         if rest.is_zero() {
             break;
         }
-        held = done.wait_timeout(held, rest).unwrap_or_else(|e| e.into_inner()).0;
+        held = done
+            .wait_timeout(held, rest)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
     }
     drop(held);
     let waited = started.elapsed().min(left);
@@ -276,7 +285,10 @@ fn start(p: &Arc<Pending>, priority: u8) {
     let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(new) = queue.push(p, priority) {
         if new {
-            PEAK.fetch_max(WAITING.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+            PEAK.fetch_max(
+                WAITING.fetch_add(1, Ordering::Relaxed) + 1,
+                Ordering::Relaxed,
+            );
         }
         AVAILABLE.notify_one();
     }

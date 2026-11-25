@@ -346,6 +346,13 @@ mod tests {
 }
 
 #[cfg(not(windows))]
-pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Option<Console>, _: Option<u64>) -> Result<()> {
+pub fn run(
+    _: &Path,
+    _: Unimplemented,
+    _: bool,
+    _: bool,
+    _: Option<Console>,
+    _: Option<u64>,
+) -> Result<()> {
     anyhow::bail!("running titles requires Windows")
 }

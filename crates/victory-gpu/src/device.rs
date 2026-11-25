@@ -377,7 +377,9 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
             let mut bytes = [0u8; 128];
             (at != 0 && crate::host::read_into(at as *const u8, &mut bytes)).then(|| {
                 bytes
-                    .as_chunks::<8>().0.iter()
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|c| c.iter().rev().fold(0u64, |v, &b| v << 8 | u64::from(b)))
                     .collect()
             })
@@ -385,9 +387,7 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         #[cfg(not(windows))]
         let words = |_: usize| None::<Vec<u64>>;
         let description = words(desc as usize);
-        let first = description
-            .as_ref()
-            .and_then(|w| words(w[0] as usize));
+        let first = description.as_ref().and_then(|w| words(w[0] as usize));
         tracing::warn!(
             slot = format_args!("{:#x}", SLOT),
             calls,

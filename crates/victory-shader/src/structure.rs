@@ -846,7 +846,11 @@ impl<'a> Lanes<'a> {
                 .filter(|(lo, hi)| lo != hi)
                 .map(|&(lo, hi)| (hi, lo))
                 .collect(),
-            paired_masks: if self.p.wave64 { self.masks } else { Map::default() },
+            paired_masks: if self.p.wave64 {
+                self.masks
+            } else {
+                Map::default()
+            },
             active: self.active,
             wide: self.wide,
             wave_any: self.wave_any,
@@ -1247,7 +1251,11 @@ impl<'a> Lanes<'a> {
                     let e = exec.unwrap_or(Bool::TRUE);
                     let own = self.b.given(m, e);
                     if self.b.implies(m, e)
-                        && self.b.support(own).iter().all(|a| matches!(a, Atom::Uniform(_)))
+                        && self
+                            .b
+                            .support(own)
+                            .iter()
+                            .all(|a| matches!(a, Atom::Uniform(_)))
                     {
                         self.scc_lane.insert(scc, own);
                     }

@@ -47,7 +47,11 @@ pub(crate) fn level() -> Option<f32> {
         if set.trim() == "off" {
             return -1.0;
         }
-        set.trim().parse().ok().filter(|l: &f32| l.is_finite() && *l >= 0.0).unwrap_or(DEFAULT)
+        set.trim()
+            .parse()
+            .ok()
+            .filter(|l: &f32| l.is_finite() && *l >= 0.0)
+            .unwrap_or(DEFAULT)
     });
     (level >= 0.0).then_some(level)
 }
@@ -92,12 +96,22 @@ unsafe impl Send for Pass {}
 unsafe impl Sync for Pass {}
 
 fn make(device: &ID3D12Device) -> windows::core::Result<Pass> {
-    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT { Format: DXGI_FORMAT_R32_UINT, ..Default::default() };
+    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+        Format: DXGI_FORMAT_R32_UINT,
+        ..Default::default()
+    };
     // SAFETY: a feature query with a correctly sized output.
-    unsafe { device.CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
-        (&raw mut support).cast(), size_of_val(&support) as u32)?; }
+    unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT,
+            (&raw mut support).cast(),
+            size_of_val(&support) as u32,
+        )?;
+    }
     if support.Support2.0 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE.0 == 0 {
-        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x80004001u32 as i32)));
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x80004001u32 as i32,
+        )));
     }
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
@@ -155,7 +169,11 @@ fn uav_barrier(list: &ID3D12GraphicsCommandList) {
 
 /// Replace the resolved indirect term with a constant. Returns whether a
 /// helper dispatch was recorded; the caller must restore guest bindings.
-pub(crate) fn raise(list: &HostList, resource: This, view: &D3D12_UNORDERED_ACCESS_VIEW_DESC) -> bool {
+pub(crate) fn raise(
+    list: &HostList,
+    resource: This,
+    view: &D3D12_UNORDERED_ACCESS_VIEW_DESC,
+) -> bool {
     let (Some(level), Some(host)) = (level(), host()) else {
         return false;
     };
@@ -168,10 +186,17 @@ pub(crate) fn raise(list: &HostList, resource: This, view: &D3D12_UNORDERED_ACCE
     let d = unsafe { light.GetDesc() };
     if !eligible(&d, view) {
         static UNSUPPORTED: std::sync::Once = std::sync::Once::new();
-        UNSUPPORTED.call_once(|| tracing::warn!(width=d.Width, height=d.Height,
-            format=d.Format.0, layers=d.DepthOrArraySize, view_format=view.Format.0,
-            view_dimension=view.ViewDimension.0,
-            "ambient fallback skipped: unsupported output shape or view"));
+        UNSUPPORTED.call_once(|| {
+            tracing::warn!(
+                width = d.Width,
+                height = d.Height,
+                format = d.Format.0,
+                layers = d.DepthOrArraySize,
+                view_format = view.Format.0,
+                view_dimension = view.ViewDimension.0,
+                "ambient fallback skipped: unsupported output shape or view"
+            )
+        });
         return false;
     }
     static PASS: OnceLock<Option<Pass>> = OnceLock::new();
@@ -191,25 +216,49 @@ pub(crate) fn raise(list: &HostList, resource: This, view: &D3D12_UNORDERED_ACCE
         return false;
     }
     ONCE.call_once(|| {
-        tracing::info!(level, width = d.Width, height = d.Height, "Starport ambient fallback enabled (constant indirect light; rays remain unavailable)");
+        tracing::info!(
+            level,
+            width = d.Width,
+            height = d.Height,
+            "Starport ambient fallback enabled (constant indirect light; rays remain unavailable)"
+        );
     });
-    let Some(views) = copy.ambient_view.get_or_init(|| {
-        let created = unsafe {
-            host.device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(&D3D12_DESCRIPTOR_HEAP_DESC {
-                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                NumDescriptors: 1, Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, NodeMask: 0,
-            })
-        };
-        match created {
-            Ok(heap) => {
-                // SAFETY: one new slot; immutable for this allocation's lifetime.
-                unsafe { host.device.CreateUnorderedAccessView(light, None::<&ID3D12Resource>,
-                    Some(view), heap.GetCPUDescriptorHandleForHeapStart()); }
-                Some(heap)
+    let Some(views) = copy
+        .ambient_view
+        .get_or_init(|| {
+            let created = unsafe {
+                host.device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(
+                    &D3D12_DESCRIPTOR_HEAP_DESC {
+                        Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        NumDescriptors: 1,
+                        Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                        NodeMask: 0,
+                    },
+                )
+            };
+            match created {
+                Ok(heap) => {
+                    // SAFETY: one new slot; immutable for this allocation's lifetime.
+                    unsafe {
+                        host.device.CreateUnorderedAccessView(
+                            light,
+                            None::<&ID3D12Resource>,
+                            Some(view),
+                            heap.GetCPUDescriptorHandleForHeapStart(),
+                        );
+                    }
+                    Some(heap)
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, "ambient descriptor allocation failed");
+                    None
+                }
             }
-            Err(e) => { tracing::warn!(error=%e, "ambient descriptor allocation failed"); None }
-        }
-    }).as_ref() else { return false; };
+        })
+        .as_ref()
+    else {
+        return false;
+    };
     list.keep(views);
     crate::list::ensure_state(list, resource, 0x8);
     list.keep(light);
@@ -225,12 +274,7 @@ pub(crate) fn raise(list: &HostList, resource: This, view: &D3D12_UNORDERED_ACCE
         l.SetPipelineState(&pass.pso);
         let constants = [level, 1.0f32, 0.98, 0.94];
         l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
-        l.SetComputeRootDescriptorTable(
-            1,
-            D3D12_GPU_DESCRIPTOR_HANDLE {
-                ptr: gpu.ptr,
-            },
-        );
+        l.SetComputeRootDescriptorTable(1, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: gpu.ptr });
         l.Dispatch((d.Width as u32).div_ceil(8), d.Height.div_ceil(8), 1);
     }
     uav_barrier(l);
@@ -239,10 +283,16 @@ pub(crate) fn raise(list: &HostList, resource: This, view: &D3D12_UNORDERED_ACCE
 
 fn eligible(d: &D3D12_RESOURCE_DESC, v: &D3D12_UNORDERED_ACCESS_VIEW_DESC) -> bool {
     if d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
-        || d.Format != DXGI_FORMAT_R32_UINT || d.DepthOrArraySize != 1
-        || d.Width == 0 || d.Width > u64::from(u32::MAX) || d.Height == 0
-        || d.SampleDesc.Count != 1 || d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0
-        || v.Format != DXGI_FORMAT_R32_UINT || v.ViewDimension != D3D12_UAV_DIMENSION_TEXTURE2D {
+        || d.Format != DXGI_FORMAT_R32_UINT
+        || d.DepthOrArraySize != 1
+        || d.Width == 0
+        || d.Width > u64::from(u32::MAX)
+        || d.Height == 0
+        || d.SampleDesc.Count != 1
+        || d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0
+        || v.Format != DXGI_FORMAT_R32_UINT
+        || v.ViewDimension != D3D12_UAV_DIMENSION_TEXTURE2D
+    {
         return false;
     }
     // SAFETY: dimension checked above. One immutable descriptor per allocation.
@@ -256,12 +306,25 @@ mod tests {
 
     #[test]
     fn ambient_rejects_other_planes_mips_arrays_and_formats() {
-        let mut d = D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-            Width: 16, Height: 16, DepthOrArraySize: 1, MipLevels: 1,
-            Format: DXGI_FORMAT_R32_UINT, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, ..Default::default() };
-        let mut v = D3D12_UNORDERED_ACCESS_VIEW_DESC { Format: DXGI_FORMAT_R32_UINT,
-            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D, ..Default::default() };
+        let mut d = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: 16,
+            Height: 16,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R32_UINT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut v = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_UINT,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            ..Default::default()
+        };
         assert!(eligible(&d, &v));
         v.Anonymous.Texture2D.MipSlice = 1;
         assert!(!eligible(&d, &v));

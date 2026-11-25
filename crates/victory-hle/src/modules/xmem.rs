@@ -23,9 +23,7 @@ use windows_sys::Win32::System::Memory::{
     MemExtendedParameterAddressRequirements, PAGE_NOACCESS, PAGE_READWRITE, SEC_COMMIT,
     SEC_RESERVE, UnmapViewOfFile2, VirtualAlloc, VirtualAlloc2, VirtualFree, VirtualQueryEx,
 };
-use windows_sys::Win32::System::ProcessStatus::{
-    K32GetPerformanceInfo, PERFORMANCE_INFORMATION,
-};
+use windows_sys::Win32::System::ProcessStatus::{K32GetPerformanceInfo, PERFORMANCE_INFORMATION};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::core::BOOL;
 
@@ -39,12 +37,18 @@ static VIRTUAL_RANGES: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new(
 pub(crate) fn note_virtual(at: *mut c_void, size: usize) {
     if !at.is_null() {
         let size = size.checked_next_multiple_of(4096).unwrap_or(size);
-        VIRTUAL_RANGES.lock().unwrap_or_else(|e| e.into_inner()).insert(at as usize, size);
+        VIRTUAL_RANGES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(at as usize, size);
     }
 }
 
 pub(crate) fn forget_virtual(at: *mut c_void) {
-    VIRTUAL_RANGES.lock().unwrap_or_else(|e| e.into_inner()).remove(&(at as usize));
+    VIRTUAL_RANGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(at as usize));
 }
 
 /// Count unique guest physical pages and private committed guest reservations.
@@ -61,15 +65,29 @@ pub(crate) fn title_usage() -> usize {
         while at < end {
             let mut info = MEMORY_BASIC_INFORMATION::default();
             // SAFETY: querying our address space; no guest memory is dereferenced.
-            if unsafe { VirtualQueryEx(GetCurrentProcess(), at as *const _, &mut info, size_of_val(&info)) } == 0 {
+            if unsafe {
+                VirtualQueryEx(
+                    GetCurrentProcess(),
+                    at as *const _,
+                    &mut info,
+                    size_of_val(&info),
+                )
+            } == 0
+            {
                 break;
             }
-            let next = (info.BaseAddress as usize).saturating_add(info.RegionSize).min(end);
-            if next <= at { break; }
+            let next = (info.BaseAddress as usize)
+                .saturating_add(info.RegionSize)
+                .min(end);
+            if next <= at {
+                break;
+            }
             if info.State != windows_sys::Win32::System::Memory::MEM_FREE {
                 live = true;
             }
-            if info.State == MEM_COMMIT && info.Type == windows_sys::Win32::System::Memory::MEM_PRIVATE {
+            if info.State == MEM_COMMIT
+                && info.Type == windows_sys::Win32::System::Memory::MEM_PRIVATE
+            {
                 used = used.saturating_add(next - at);
             }
             at = next;
@@ -372,7 +390,9 @@ pub extern "system" fn XMemFreeDefault(address: *mut c_void, attributes: u64) {
     // whole reservation, or a header-prefixed block.
     unsafe {
         if attributes & ALLOC_32BIT != 0 {
-            if VirtualFree(address, 0, MEM_RELEASE) != 0 { forget_virtual(address); }
+            if VirtualFree(address, 0, MEM_RELEASE) != 0 {
+                forget_virtual(address);
+            }
             return;
         }
         let user = address.cast::<u8>();
@@ -794,7 +814,12 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     // New contents, read-write: the GPU side's copies no longer guard it.
     victory_gpu::title_memory_remapped(base, len);
     // What the range shows now, for the GPU side's in-place census.
-    victory_gpu::title_memory_view(base, len, slice.section.0 as usize, (slice.index * PAGE) as u64);
+    victory_gpu::title_memory_view(
+        base,
+        len,
+        slice.section.0 as usize,
+        (slice.index * PAGE) as u64,
+    );
     physical.views.insert(base, (len, slice));
     true
 }
@@ -1020,14 +1045,24 @@ mod tests {
     fn guest_usage_excludes_host_scratch_and_releases_allocations() {
         let before = title_usage();
         let scratch = vec![0x5au8; 1 << 20];
-        assert_eq!(title_usage(), before, "host scratch is not a guest allocation");
+        assert_eq!(
+            title_usage(),
+            before,
+            "host scratch is not a guest allocation"
+        );
         let p = XMemAllocDefault(64 << 10, 0);
         assert!(!p.is_null());
         assert!(title_usage() >= before + (64 << 10));
         XMemFreeDefault(p, 0);
         assert_eq!(title_usage(), before);
         assert_eq!(scratch[0], 0x5a);
-        let p = XMemVirtualAlloc(std::ptr::null_mut(), 64 << 10, MEM_RESERVE | MEM_COMMIT, 0, PAGE_READWRITE);
+        let p = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            64 << 10,
+            MEM_RESERVE | MEM_COMMIT,
+            0,
+            PAGE_READWRITE,
+        );
         assert!(!p.is_null());
         assert!(title_usage() >= before + (64 << 10));
         assert_eq!(super::super::kernel::VirtualFree(p, 0, MEM_RELEASE), 1);

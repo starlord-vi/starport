@@ -115,7 +115,8 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
 /// heap's views ran long, 25-50 ms in the others. These numbers say
 /// whether a few askings wait for something or all of them are slow.
 #[cfg(feature = "diagnostics")]
-static SLOW: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+static SLOW: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 #[cfg(feature = "diagnostics")]
 fn slow(us: u64) {
@@ -292,7 +293,15 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
     j.ahead
         .iter()
         .any(|&(a, b)| a <= first && last <= b)
-        .then(|| (j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
+        .then(|| {
+            (
+                j.ahead_asked,
+                j.written
+                    .range(first..last)
+                    .map(|(&p, &w)| (p, w))
+                    .collect(),
+            )
+        })
 }
 
 /// The pages of `[start, end)` (whole pages) as last written, for pages
@@ -341,7 +350,10 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
         let guarding = std::time::Instant::now();
         let written = guard(first * PAGE, last * PAGE);
         #[cfg(feature = "diagnostics")]
-        crate::copystat::add(crate::copystat::C::GuardUs, guarding.elapsed().as_micros() as u64);
+        crate::copystat::add(
+            crate::copystat::C::GuardUs,
+            guarding.elapsed().as_micros() as u64,
+        );
         written?
     } else {
         Vec::new()
@@ -403,11 +415,12 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     // of the 68 ms a frame of "guards" (run 58).
     // `VICTORY_GUARD_ASK=1` asks every time, as before.
     static ASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let known = !*ASK.get_or_init(|| std::env::var_os("VICTORY_GUARD_ASK").is_some_and(|v| v == "1")) && {
-        let g = guards();
-        let first = start / BLOCK;
-        g.protected.contains(&first) || g.absent.contains(&first)
-    };
+    let known =
+        !*ASK.get_or_init(|| std::env::var_os("VICTORY_GUARD_ASK").is_some_and(|v| v == "1")) && {
+            let g = guards();
+            let first = start / BLOCK;
+            g.protected.contains(&first) || g.absent.contains(&first)
+        };
     if !known && !is_view(start, end) {
         return None;
     }
@@ -479,7 +492,8 @@ fn is_view(start: usize, end: usize) -> bool {
         MEM_COMMIT, MEM_MAPPED, MEMORY_BASIC_INFORMATION, VirtualQuery,
     };
     static HOLES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let holes = *HOLES.get_or_init(|| std::env::var_os("VICTORY_GUARD_HOLES").is_none_or(|v| v != "0"));
+    let holes =
+        *HOLES.get_or_init(|| std::env::var_os("VICTORY_GUARD_HOLES").is_none_or(|v| v != "0"));
     let mut at = start;
     loop {
         // SAFETY: plain data filled in by the query.
@@ -631,7 +645,9 @@ pub fn title_memory_remapping() -> Remapping {
 pub(crate) fn stable_mapping_copy(copy: impl FnOnce() -> bool) -> bool {
     use std::sync::atomic::Ordering::SeqCst;
     let before = MAPPING_VERSION.load(SeqCst);
-    if before & 1 != 0 { return false; }
+    if before & 1 != 0 {
+        return false;
+    }
     let copied = copy();
     copied && MAPPING_VERSION.load(SeqCst) == before
 }
@@ -646,7 +662,9 @@ mod mapping_snapshot_tests {
         let (done, finished) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
             started.recv().unwrap();
-            { let _mapping = title_memory_remapping(); }
+            {
+                let _mapping = title_memory_remapping();
+            }
             done.send(()).unwrap();
         });
         assert!(!stable_mapping_copy(|| {
@@ -655,14 +673,22 @@ mod mapping_snapshot_tests {
             true // ReadProcessMemory can succeed across a remapping.
         }));
         writer.join().unwrap();
-        assert!(stable_mapping_copy(|| true), "stable successful copies publish");
-        assert!(!stable_mapping_copy(|| false), "incomplete reads never publish");
+        assert!(
+            stable_mapping_copy(|| true),
+            "stable successful copies publish"
+        );
+        assert!(
+            !stable_mapping_copy(|| false),
+            "incomplete reads never publish"
+        );
     }
 
     #[test]
     fn an_active_mapping_writer_defers_instead_of_waiting_or_reading() {
         let mapping = title_memory_remapping();
-        assert!(!stable_mapping_copy(|| panic!("must not read an unstable mapping")));
+        assert!(!stable_mapping_copy(|| panic!(
+            "must not read an unstable mapping"
+        )));
         drop(mapping);
         assert!(stable_mapping_copy(|| true));
     }
@@ -993,7 +1019,11 @@ mod tests {
         // The range begins in the placeholder, its middle block is a view.
         assert!(is_view(p, p + 3 * BLOCK));
         assert_eq!(guard(p, p + 3 * BLOCK), Some(all));
-        assert_eq!(guard(p, p + 3 * BLOCK), Some(Vec::new()), "nothing written since");
+        assert_eq!(
+            guard(p, p + 3 * BLOCK),
+            Some(Vec::new()),
+            "nothing written since"
+        );
         // SAFETY: inside the mapped middle block.
         unsafe { ((p + BLOCK + 8) as *mut u8).write_volatile(1) };
         assert_eq!(guard(p, p + 3 * BLOCK), Some(pages(1).collect()));
@@ -1137,7 +1167,10 @@ mod mapping_tests {
         };
         wait.recv().unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!changed.load(Ordering::SeqCst), "the mapping changed under a read in place");
+        assert!(
+            !changed.load(Ordering::SeqCst),
+            "the mapping changed under a read in place"
+        );
         drop(reading);
         change.join().unwrap();
         assert!(changed.load(Ordering::SeqCst));
@@ -1155,7 +1188,10 @@ mod mapping_tests {
         };
         wait.recv().unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!read.load(Ordering::SeqCst), "a read in place began during a change of mapping");
+        assert!(
+            !read.load(Ordering::SeqCst),
+            "a read in place began during a change of mapping"
+        );
         drop(changing);
         reader.join().unwrap();
         assert!(read.load(Ordering::SeqCst));

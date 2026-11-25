@@ -279,7 +279,10 @@ pub(crate) fn target_format(format: u32) -> u32 {
                     | D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0;
                 let refused = asked.is_err() || support.Support1.0 & both != both;
                 if refused {
-                    tracing::info!(format = f, "the host does not render to this format: 8-bit RGBA stands in");
+                    tracing::info!(
+                        format = f,
+                        "the host does not render to this format: 8-bit RGBA stands in"
+                    );
                 }
                 refused
             })
@@ -1137,7 +1140,8 @@ pub(crate) struct HostTexture {
     pub(crate) first_mip: u32,
     pub(crate) last_used_frame: std::sync::atomic::AtomicU64,
     /// One immutable ambient-fallback UAV; lists retain it through GPU completion.
-    pub(crate) ambient_view: std::sync::OnceLock<Option<windows::Win32::Graphics::Direct3D12::ID3D12DescriptorHeap>>,
+    pub(crate) ambient_view:
+        std::sync::OnceLock<Option<windows::Win32::Graphics::Direct3D12::ID3D12DescriptorHeap>>,
     pub(crate) texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
     pub(crate) state: std::sync::atomic::AtomicU32,
     /// The bytes the host gives it.
@@ -1301,7 +1305,11 @@ pub(crate) fn host_waits(this: This) -> bool {
     let r = resource(this);
     r.desc.dimension != BUFFER
         && !r.host.refused.load(std::sync::atomic::Ordering::Relaxed)
-        && r.host.made.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+        && r.host
+            .made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
 }
 
 /// The host side of title texture `this`: made now if it is not there and
@@ -1532,7 +1540,9 @@ pub(crate) fn census() -> [u64; 10] {
                     placed_filled += 1;
                     // Its first page: a texture's smallest mips lie there,
                     // and are mapped first and unmapped last.
-                    if placed_filled.is_multiple_of(EVERY) && !crate::texture::committed(r.data().cast_const(), 1) {
+                    if placed_filled.is_multiple_of(EVERY)
+                        && !crate::texture::committed(r.data().cast_const(), 1)
+                    {
                         count[8] += host.bytes * EVERY;
                         if crate::host::references(&host.texture) > 1 {
                             count[9] += host.bytes * EVERY;
@@ -1564,13 +1574,18 @@ fn host_bytes(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) ->
     // SAFETY: plain queries on a live resource and device.
     unsafe {
         let desc = texture.GetDesc();
-        host.device.GetResourceAllocationInfo(0, &[desc]).SizeInBytes
+        host.device
+            .GetResourceAllocationInfo(0, &[desc])
+            .SizeInBytes
     }
 }
 
 #[cfg(windows)]
 impl HostTexture {
-    fn new(texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource, state: u32) -> HostTexture {
+    fn new(
+        texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        state: u32,
+    ) -> HostTexture {
         use std::sync::atomic::Ordering::Relaxed;
         let bytes = host_bytes(&texture);
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
@@ -1593,14 +1608,19 @@ impl HostTexture {
 #[cfg(windows)]
 fn streaming_first_mip(desc: &ResourceDesc, placed: bool) -> u32 {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(|| std::env::var_os("STARPORT_SKIP_TOP_MIP").is_some_and(|v| v == "1"));
+    let on =
+        *ON.get_or_init(|| std::env::var_os("STARPORT_SKIP_TOP_MIP").is_some_and(|v| v == "1"));
     u32::from(skip_streaming_mip(desc, placed, on))
 }
 
 #[cfg(windows)]
 fn skip_streaming_mip(desc: &ResourceDesc, placed: bool, on: bool) -> bool {
-    on && placed && fills(desc) && desc.dimension == 3 && desc.sample_count == 1
-        && desc.mip_levels != 1 && desc.width.max(u64::from(desc.height)) >= 2048
+    on && placed
+        && fills(desc)
+        && desc.dimension == 3
+        && desc.sample_count == 1
+        && desc.mip_levels != 1
+        && desc.width.max(u64::from(desc.height)) >= 2048
         && matches!(pc_format(desc.format), 70..=84 | 94..=99)
 }
 
@@ -1612,7 +1632,11 @@ pub(crate) fn host_first_mip(this: This) -> u32 {
 /// Descriptor size fields, from the view's actual shape. Unlike an assumed
 /// Texture2D GetDimensions handle, this also describes arrays/cubes/volumes.
 #[cfg(windows)]
-pub(crate) fn texture_view_words(words: &[u32; 14], view: Option<&[u32; 10]>, placed: bool) -> Option<[u32; 4]> {
+pub(crate) fn texture_view_words(
+    words: &[u32; 14],
+    view: Option<&[u32; 10]>,
+    placed: bool,
+) -> Option<[u32; 4]> {
     // SAFETY: resource descriptions are fourteen plain words.
     let desc = unsafe { words.as_ptr().cast::<ResourceDesc>().read_unaligned() };
     texture_size_words(&desc, view, streaming_first_mip(&desc, placed))
@@ -1620,25 +1644,64 @@ pub(crate) fn texture_view_words(words: &[u32; 14], view: Option<&[u32; 10]>, pl
 
 #[cfg(windows)]
 pub(crate) fn object_view_words(this: This, view: Option<&[u32; 10]>) -> Option<[u32; 4]> {
-    if this.is_null() { return None; }
+    if this.is_null() {
+        return None;
+    }
     let r = resource(this);
-    texture_size_words(&r.desc, view, streaming_first_mip(&r.desc, r.host.placed.load(std::sync::atomic::Ordering::Relaxed)))
+    texture_size_words(
+        &r.desc,
+        view,
+        streaming_first_mip(
+            &r.desc,
+            r.host.placed.load(std::sync::atomic::Ordering::Relaxed),
+        ),
+    )
 }
 
 #[cfg(windows)]
-fn texture_size_words(desc: &ResourceDesc, view: Option<&[u32; 10]>, skip: u32) -> Option<[u32; 4]> {
-    if desc.dimension == BUFFER { return None; }
-    let extent = desc.width.max(u64::from(desc.height)).max(if desc.dimension == 4 { u64::from(desc.depth_or_array_size) } else { 1 });
-    let full = if desc.mip_levels == 0 { 64 - extent.leading_zeros() } else { u32::from(desc.mip_levels) };
-    let dimension = view.map(|v| v[1]).unwrap_or(match (desc.dimension, desc.depth_or_array_size > 1) {
-        (2, false) => 2, (2, true) => 3, (3, false) => 4, (3, true) => 5, (4, _) => 8, _ => return None,
-    });
+fn texture_size_words(
+    desc: &ResourceDesc,
+    view: Option<&[u32; 10]>,
+    skip: u32,
+) -> Option<[u32; 4]> {
+    if desc.dimension == BUFFER {
+        return None;
+    }
+    let extent = desc
+        .width
+        .max(u64::from(desc.height))
+        .max(if desc.dimension == 4 {
+            u64::from(desc.depth_or_array_size)
+        } else {
+            1
+        });
+    let full = if desc.mip_levels == 0 {
+        64 - extent.leading_zeros()
+    } else {
+        u32::from(desc.mip_levels)
+    };
+    let dimension =
+        view.map(|v| v[1])
+            .unwrap_or(match (desc.dimension, desc.depth_or_array_size > 1) {
+                (2, false) => 2,
+                (2, true) => 3,
+                (3, false) => 4,
+                (3, true) => 5,
+                (4, _) => 8,
+                _ => return None,
+            });
     let original_first = view.map_or(0, |v| v[4]);
     let first = original_first.max(skip).min(full.saturating_sub(1));
-    let end = original_first.saturating_add(view.map_or(full, |v| v[5])).min(full);
+    let end = original_first
+        .saturating_add(view.map_or(full, |v| v[5]))
+        .min(full);
     let levels = end.saturating_sub(first).max(1);
     let width = (desc.width >> first).max(1) as u32;
-    let height = if desc.dimension == 2 { 1 } else { desc.height.checked_shr(first).unwrap_or(0).max(1) };
+    let height = if desc.dimension == 2 {
+        1
+    } else {
+        desc.height.checked_shr(first).unwrap_or(0).max(1)
+    };
     let layers = u32::from(desc.depth_or_array_size);
     let (kind, depth) = match dimension {
         2 => (8, 1),
@@ -1652,8 +1715,12 @@ fn texture_size_words(desc: &ResourceDesc, view: Option<&[u32; 10]>, skip: u32) 
         _ => return None,
     };
     let w = width - 1;
-    Some([w << 30, (w >> 2 & 0x3fff) | (height - 1) << 14 | 1 << 31,
-        0xfac | kind << 28 | (levels - 1) << 16, depth.saturating_sub(1)])
+    Some([
+        w << 30,
+        (w >> 2 & 0x3fff) | (height - 1) << 14 | 1 << 31,
+        0xfac | kind << 28 | (levels - 1) << 16,
+        depth.saturating_sub(1),
+    ])
 }
 
 #[cfg(windows)]
@@ -1674,7 +1741,10 @@ impl Drop for HostTexture {
 /// (never released), for the memory line.
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn placed_textures() -> u64 {
-    PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner()).len() as u64
+    PLACED_TEXTURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len() as u64
 }
 
 /// Moves the host texture to `wanted` (a host texture state); the host
@@ -1799,7 +1869,10 @@ fn host_texture(
     }
     if let Some(t) = &texture {
         crate::host::name(t, || {
-            format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
+            format!(
+                "texture {}x{} f{} flags {:#x}",
+                d.width, d.height, d.format, d.flags
+            )
         });
     }
     texture
@@ -2393,9 +2466,15 @@ mod tests {
         desc.sample_count = 1;
         assert!(skip_streaming_mip(&desc, true, true));
         desc.mip_levels = 0;
-        assert!(skip_streaming_mip(&desc, true, true), "implicit full chains also qualify");
+        assert!(
+            skip_streaming_mip(&desc, true, true),
+            "implicit full chains also qualify"
+        );
         desc.mip_levels = 13;
-        assert!(!skip_streaming_mip(&desc, false, true), "real resources cannot shrink");
+        assert!(
+            !skip_streaming_mip(&desc, false, true),
+            "real resources cannot shrink"
+        );
         assert!(!skip_streaming_mip(&desc, true, false));
         let mut view = [0u32; 10];
         view[1] = 5; // 2D array
@@ -2409,10 +2488,16 @@ mod tests {
         assert_eq!(d3 >> 28, 13);
         assert_eq!(d4 + 1, 6);
         desc.flags |= 4;
-        assert!(!skip_streaming_mip(&desc, true, true), "GPU-writable images cannot shrink");
+        assert!(
+            !skip_streaming_mip(&desc, true, true),
+            "GPU-writable images cannot shrink"
+        );
         desc.flags = 0;
         desc.format = 28;
-        assert!(!skip_streaming_mip(&desc, true, true), "uncompressed aliases stay exact");
+        assert!(
+            !skip_streaming_mip(&desc, true, true),
+            "uncompressed aliases stay exact"
+        );
     }
 
     fn heap(size: u64) -> This {
@@ -2812,20 +2897,44 @@ mod tests {
         use windows::Win32::Graphics::Direct3D12::*;
         let host = crate::host::host().expect("GPU required for movie upload regression");
         let null = std::ptr::null();
-        let images: Vec<This> = (0..3).map(|_| {
-            let mut image = null;
-            assert_eq!(create_committed(null, &PROPERTIES, 0, &texture(4, 4, 28, 1),
-                0x80, null.cast(), &RESOURCE_IIDS[0], &mut image), S_OK);
-            image
-        }).collect();
+        let images: Vec<This> = (0..3)
+            .map(|_| {
+                let mut image = null;
+                assert_eq!(
+                    create_committed(
+                        null,
+                        &PROPERTIES,
+                        0,
+                        &texture(4, 4, 28, 1),
+                        0x80,
+                        null.cast(),
+                        &RESOURCE_IIDS[0],
+                        &mut image
+                    ),
+                    S_OK
+                );
+                image
+            })
+            .collect();
         let (readback, _) = host.upload_buffer(3 * 1024).expect("footprint template");
         // A real readback heap, with the same buffer description.
         let mut back: Option<ID3D12Resource> = None;
         // SAFETY: valid output and a buffer description.
-        unsafe { host.device.CreateCommittedResource(
-            &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_READBACK, ..Default::default() },
-            D3D12_HEAP_FLAG_NONE, &readback.GetDesc(), D3D12_RESOURCE_STATE_COPY_DEST,
-            None, &mut back).unwrap(); }
+        unsafe {
+            host.device
+                .CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_READBACK,
+                        ..Default::default()
+                    },
+                    D3D12_HEAP_FLAG_NONE,
+                    &readback.GetDesc(),
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut back,
+                )
+                .unwrap();
+        }
         let back = back.unwrap();
         for frame in 1u8..=18 {
             let image = images[usize::from(frame - 1) % images.len()];
@@ -2837,28 +2946,44 @@ mod tests {
                 // SAFETY: borrowed references; these locations do not release them.
                 pResource: unsafe { std::mem::transmute_copy(&back) },
                 Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                    Offset: 0, Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(28),
-                        Width: 4, Height: 4, Depth: 1, RowPitch: 256,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: 0,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(28),
+                            Width: 4,
+                            Height: 4,
+                            Depth: 1,
+                            RowPitch: 256,
+                        },
                     },
-                } },
+                },
             };
             let from = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: as above.
                 pResource: unsafe { std::mem::transmute_copy(gpu) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: 0,
+                },
             };
             // SAFETY: an open list and valid footprints in live resources.
-            unsafe { list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None); }
+            unsafe {
+                list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+            }
             list.close();
             let (memory, desc) = texture_memory(image).unwrap();
             let size = texture_layout(&desc).unwrap().planes[0].layout.size as usize;
             // SAFETY: title-owned CPU memory, no submitted GPU work yet.
-            unsafe { memory.cast_mut().write_bytes(frame, size); }
+            unsafe {
+                memory.cast_mut().write_bytes(frame, size);
+            }
             host.execute(&[&list]);
-            assert_eq!(crate::texture::cpu_staging_bytes(image), 0, "CPU pixels reclaimed after the upload snapshot");
+            assert_eq!(
+                crate::texture::cpu_staging_bytes(image),
+                0,
+                "CPU pixels reclaimed after the upload snapshot"
+            );
             if frame == 4 {
                 crate::residency::eviction_roundtrip(&host_copy(image).unwrap());
                 // Replay without a CPU write or upload: the restored texture
@@ -2868,10 +2993,22 @@ mod tests {
             let mut mapped = std::ptr::null_mut();
             // SAFETY: execute waited for the copy; each row has 16 valid bytes.
             unsafe {
-                back.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 1024 }), Some(&mut mapped)).unwrap();
+                back.Map(
+                    0,
+                    Some(&D3D12_RANGE {
+                        Begin: 0,
+                        End: 1024,
+                    }),
+                    Some(&mut mapped),
+                )
+                .unwrap();
                 let bytes = std::slice::from_raw_parts(mapped.cast::<u8>(), 1024);
                 for row in 0..4 {
-                    assert_eq!(&bytes[row * 256..][..16], &[frame; 16], "frame {frame}, row {row}");
+                    assert_eq!(
+                        &bytes[row * 256..][..16],
+                        &[frame; 16],
+                        "frame {frame}, row {row}"
+                    );
                 }
                 back.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
             }
@@ -2895,7 +3032,9 @@ mod tests {
             let address = memory as usize;
             list.defer(move || {
                 // SAFETY: the test owns this CPU memory throughout execution.
-                unsafe { (address as *mut u8).write_bytes(0x81 + index as u8, size); }
+                unsafe {
+                    (address as *mut u8).write_bytes(0x81 + index as u8, size);
+                }
             });
             crate::texture::upload(&list, image, gpu);
             crate::list::ensure_state(&list, image, 0x800);
@@ -2903,21 +3042,31 @@ mod tests {
                 // SAFETY: borrowed references; locations never release them.
                 pResource: unsafe { std::mem::transmute_copy(&back) },
                 Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                    Offset: (index * 1024) as u64, Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(28),
-                        Width: 4, Height: 4, Depth: 1, RowPitch: 256,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: (index * 1024) as u64,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(28),
+                            Width: 4,
+                            Height: 4,
+                            Depth: 1,
+                            RowPitch: 256,
+                        },
                     },
-                } },
+                },
             };
             let from = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: as above.
                 pResource: unsafe { std::mem::transmute_copy(gpu) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: 0,
+                },
             };
             // SAFETY: open list, live resources, disjoint destinations.
-            unsafe { list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None); }
+            unsafe {
+                list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+            }
             list.close();
             queued.push(list);
         }
@@ -2925,18 +3074,31 @@ mod tests {
         let mut mapped = std::ptr::null_mut();
         // SAFETY: execute waited; all three copies finished.
         unsafe {
-            back.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 3072 }), Some(&mut mapped)).unwrap();
+            back.Map(
+                0,
+                Some(&D3D12_RANGE {
+                    Begin: 0,
+                    End: 3072,
+                }),
+                Some(&mut mapped),
+            )
+            .unwrap();
             let bytes = std::slice::from_raw_parts(mapped.cast::<u8>(), 3072);
             for index in 0..3 {
                 for row in 0..4 {
-                    assert_eq!(&bytes[index * 1024 + row * 256..][..16], &[0x81 + index as u8; 16],
-                        "queued version {index}, row {row}");
+                    assert_eq!(
+                        &bytes[index * 1024 + row * 256..][..16],
+                        &[0x81 + index as u8; 16],
+                        "queued version {index}, row {row}"
+                    );
                 }
             }
             back.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
         }
         drop(queued);
-        for image in images { crate::object::release(image); }
+        for image in images {
+            crate::object::release(image);
+        }
     }
 
     /// A 16-bit depth texture the title also asks unordered access for gets
@@ -3496,7 +3658,10 @@ mod tests {
         list.twins_written();
         if early {
             assert!(list.publish_material_depth());
-            assert!(!list.publish_material_depth(), "do not resolve the same write twice");
+            assert!(
+                !list.publish_material_depth(),
+                "do not resolve the same write twice"
+            );
         }
 
         // The draws: a triangle over the target at the depth of a class,

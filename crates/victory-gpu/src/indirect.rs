@@ -343,7 +343,14 @@ fn record_clamp_as(
         }
         None => (src_gpu, 0u32, 0u32),
     };
-    let constants = [kind, stride, records, args_offset, has_count | (u32::from(ahead) << 1), count_offset];
+    let constants = [
+        kind,
+        stride,
+        records,
+        args_offset,
+        has_count | (u32::from(ahead) << 1),
+        count_offset,
+    ];
     // SAFETY: an open list; our root signature and pipeline; live source,
     // count, scratch destination, and budget buffers. `src` and `count` stay
     // in `COMMON` / `GENERIC_READ` via implicit buffer promotion while `dst`
@@ -664,7 +671,8 @@ void main() {
         let Some(mut warp) = WarpHarness::new() else {
             return;
         };
-        let compare = compile_cs(&warp.device, crate::host::CARD_COMPARE).expect("the card compare must compile on WARP");
+        let compare = compile_cs(&warp.device, crate::host::CARD_COMPARE)
+            .expect("the card compare must compile on WARP");
         const PIECE: usize = 64 << 10;
         const PIECES: u32 = 3;
         let size = PIECE * PIECES as usize;
@@ -686,7 +694,8 @@ void main() {
                 warp.list.SetComputeRootSignature(&compare.root);
                 warp.list.SetPipelineState(&compare.pso);
                 let constants = [0u32, 0, size as u32, PIECES, 0, mode];
-                warp.list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
+                warp.list
+                    .SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                 warp.list.SetComputeRootShaderResourceView(1, now_gpu);
                 warp.list.SetComputeRootUnorderedAccessView(2, hashes_gpu);
                 warp.list.SetComputeRootUnorderedAccessView(3, differs_gpu);
@@ -1071,7 +1080,8 @@ void main() {
                     D3D12_RESOURCE_STATE_COMMON,
                     D3D12_RESOURCE_STATE_COPY_SOURCE,
                 )]);
-                warp.list.CopyBufferRegion(&readback_buf, 0, &dst_buf, 0, total as u64);
+                warp.list
+                    .CopyBufferRegion(&readback_buf, 0, &dst_buf, 0, total as u64);
                 warp.list.ResourceBarrier(&[transition(
                     &dst_buf,
                     D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -1084,24 +1094,46 @@ void main() {
                 (
                     (budget_ptr as *const u32).read_volatile(),
                     (budget_ptr as *const u32).add(1).read_volatile(),
-                    std::slice::from_raw_parts(readback_ptr.cast::<u32>().cast_const(), total / 4).to_vec(),
+                    std::slice::from_raw_parts(readback_ptr.cast::<u32>().cast_const(), total / 4)
+                        .to_vec(),
                 )
             };
             for (i, groups) in filled.into_iter().enumerate() {
                 let rec = &out[i * 8..i * 8 + 4];
-                assert_eq!(rec, [groups, u32::from(groups > 0).max(1).min(1), 1, 0xAB00 + i as u32], "filled record {i}, ahead {ahead}");
+                assert_eq!(
+                    rec,
+                    [
+                        groups,
+                        u32::from(groups > 0).max(1).min(1),
+                        1,
+                        0xAB00 + i as u32
+                    ],
+                    "filled record {i}, ahead {ahead}"
+                );
             }
             let charged_filled = (5 + 519) * 128;
             if ahead {
                 for i in filled.len()..RECORDS as usize {
-                    assert_eq!(out[i * 8..i * 8 + 3], [0, 0, 0], "unfilled slot {i} must come out empty");
-                    assert_eq!(out[i * 8 + 3], u32::MAX, "the words after the record are copied as they are");
+                    assert_eq!(
+                        out[i * 8..i * 8 + 3],
+                        [0, 0, 0],
+                        "unfilled slot {i} must come out empty"
+                    );
+                    assert_eq!(
+                        out[i * 8 + 3],
+                        u32::MAX,
+                        "the words after the record are copied as they are"
+                    );
                 }
                 assert_eq!(spent, charged_filled, "unfilled slots charge nothing");
                 assert_eq!(largest, 519, "and are not counted as asked for");
             } else {
                 // Thirteen slots at 65,535 groups: sixteen would be all of it.
-                assert_eq!(spent, charged_filled + 13 * 65535 * 128, "clamped one by one, each slot is charged the most");
+                assert_eq!(
+                    spent,
+                    charged_filled + 13 * 65535 * 128,
+                    "clamped one by one, each slot is charged the most"
+                );
                 assert_eq!(largest, u32::MAX);
             }
         }

@@ -49,14 +49,25 @@ impl MemoryStatusEx {
 #[cfg(windows)]
 pub extern "system" fn GlobalMemoryStatusEx(out: *mut MemoryStatusEx) -> i32 {
     // SAFETY: the API requires a sized writable MEMORYSTATUSEX.
-    let Some(out) = (unsafe { out.as_mut() }) else { host::set_last_error(87); return 0; };
-    if out.length as usize != size_of::<MemoryStatusEx>() { host::set_last_error(87); return 0; }
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        host::set_last_error(87);
+        return 0;
+    };
+    if out.length as usize != size_of::<MemoryStatusEx>() {
+        host::set_last_error(87);
+        return 0;
+    }
     *out = MemoryStatusEx::guest(super::xmem::title_budget(), super::xmem::title_usage());
     1
 }
 
 #[cfg(windows)]
-pub extern "system" fn VirtualAlloc(base: *const c_void, size: usize, kind: u32, protect: u32) -> *mut c_void {
+pub extern "system" fn VirtualAlloc(
+    base: *const c_void,
+    size: usize,
+    kind: u32,
+    protect: u32,
+) -> *mut c_void {
     // SAFETY: preserve the Windows allocation contract and error reporting.
     let at = unsafe { windows_sys::Win32::System::Memory::VirtualAlloc(base, size, kind, protect) };
     if kind & windows_sys::Win32::System::Memory::MEM_RESERVE != 0 || base.is_null() {
@@ -672,7 +683,10 @@ mod tests {
     #[cfg(windows)]
     fn guest_memory_status_uses_the_same_title_pool_for_both_models() {
         assert_eq!(size_of::<MemoryStatusEx>(), 64);
-        for model in [victory_gpu::console::Console::SeriesS, victory_gpu::console::Console::SeriesX] {
+        for model in [
+            victory_gpu::console::Console::SeriesS,
+            victory_gpu::console::Console::SeriesX,
+        ] {
             let (fast, standard) = model.title_memory();
             let budget = fast + standard;
             let status = MemoryStatusEx::guest(budget, budget / 2);

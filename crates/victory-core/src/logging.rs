@@ -5,19 +5,26 @@
 //! only in builds with the `diagnostics` feature; a plain release build
 //! logs info and above whatever the filter asks for.
 
+use std::io::{BufWriter, Write};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc,
+};
+use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use std::io::{BufWriter, Write};
-use std::sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc};
-use std::time::{Duration, Instant};
 
 const QUEUE: usize = 1024;
 const MAX_EVENT: usize = 16 * 1024;
 static ACTIVE: OnceLock<AsyncWriter> = OnceLock::new();
 
-enum Message { Data(Vec<u8>), Flush(mpsc::SyncSender<()>) }
+enum Message {
+    Data(Vec<u8>),
+    Flush(mpsc::SyncSender<()>),
+}
 
 #[derive(Clone)]
 struct AsyncWriter {
@@ -26,7 +33,11 @@ struct AsyncWriter {
     truncated: Arc<AtomicU64>,
 }
 
-struct EventWriter { writer: AsyncWriter, bytes: Vec<u8>, truncated: bool }
+struct EventWriter {
+    writer: AsyncWriter,
+    bytes: Vec<u8>,
+    truncated: bool,
+}
 
 impl Write for EventWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -35,16 +46,26 @@ impl Write for EventWriter {
         self.truncated |= n != bytes.len();
         Ok(bytes.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Drop for EventWriter {
     fn drop(&mut self) {
         if self.truncated {
             self.writer.truncated.fetch_add(1, Ordering::Relaxed);
-            if let Some(last) = self.bytes.last_mut() { *last = b'\n'; }
+            if let Some(last) = self.bytes.last_mut() {
+                *last = b'\n';
+            }
         }
-        if !self.bytes.is_empty() && self.writer.sender.try_send(Message::Data(std::mem::take(&mut self.bytes))).is_err() {
+        if !self.bytes.is_empty()
+            && self
+                .writer
+                .sender
+                .try_send(Message::Data(std::mem::take(&mut self.bytes)))
+                .is_err()
+        {
             self.writer.lost.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -53,7 +74,11 @@ impl Drop for EventWriter {
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AsyncWriter {
     type Writer = EventWriter;
     fn make_writer(&'a self) -> EventWriter {
-        EventWriter { writer: self.clone(), bytes: Vec::with_capacity(256), truncated: false }
+        EventWriter {
+            writer: self.clone(),
+            bytes: Vec::with_capacity(256),
+            truncated: false,
+        }
     }
 }
 
@@ -67,21 +92,27 @@ impl Drop for LogGuard {
     fn drop(&mut self) {
         flush();
         self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
 /// Used at orderly title suspension. Nothing on a render thread waits for
 /// disk I/O; at shutdown this waits at most one second for the log worker.
 pub fn flush() {
-    let Some(writer) = ACTIVE.get() else { return; };
+    let Some(writer) = ACTIVE.get() else {
+        return;
+    };
     let (tx, rx) = mpsc::sync_channel(1);
     let began = Instant::now();
     let mut message = Message::Flush(tx);
     loop {
         match writer.sender.try_send(message) {
             Ok(()) => break,
-            Err(mpsc::TrySendError::Full(returned)) if began.elapsed() < Duration::from_millis(250) => {
+            Err(mpsc::TrySendError::Full(returned))
+                if began.elapsed() < Duration::from_millis(250) =>
+            {
                 message = returned;
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -93,7 +124,11 @@ pub fn flush() {
 
 fn asynchronous() -> (AsyncWriter, LogGuard) {
     let (tx, rx) = mpsc::sync_channel(QUEUE);
-    let writer = AsyncWriter { sender: tx, lost: Arc::new(AtomicU64::new(0)), truncated: Arc::new(AtomicU64::new(0)) };
+    let writer = AsyncWriter {
+        sender: tx,
+        lost: Arc::new(AtomicU64::new(0)),
+        truncated: Arc::new(AtomicU64::new(0)),
+    };
     let (lost, truncated) = (writer.lost.clone(), writer.truncated.clone());
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
@@ -137,7 +172,13 @@ fn asynchronous() -> (AsyncWriter, LogGuard) {
         }
         let _ = out.flush();
     }).expect("log worker");
-    (writer, LogGuard { stop, worker: Some(worker) })
+    (
+        writer,
+        LogGuard {
+            stop,
+            worker: Some(worker),
+        },
+    )
 }
 
 /// The most verbose level this build can log.
@@ -176,12 +217,25 @@ mod tests {
     #[test]
     fn recorder_never_blocks_a_full_queue_and_reports_loss() {
         let (tx, rx) = mpsc::sync_channel(1);
-        let writer = AsyncWriter { sender: tx, lost: Arc::new(AtomicU64::new(0)), truncated: Arc::new(AtomicU64::new(0)) };
-        { let mut event = writer.make_writer(); event.write_all(b"first").unwrap(); }
-        { let mut event = writer.make_writer(); event.write_all(b"second").unwrap(); }
+        let writer = AsyncWriter {
+            sender: tx,
+            lost: Arc::new(AtomicU64::new(0)),
+            truncated: Arc::new(AtomicU64::new(0)),
+        };
+        {
+            let mut event = writer.make_writer();
+            event.write_all(b"first").unwrap();
+        }
+        {
+            let mut event = writer.make_writer();
+            event.write_all(b"second").unwrap();
+        }
         assert_eq!(writer.lost.load(Ordering::Relaxed), 1);
         assert!(matches!(rx.try_recv(), Ok(Message::Data(bytes)) if bytes == b"first"));
-        { let mut event = writer.make_writer(); event.write_all(&vec![b'x'; MAX_EVENT+1]).unwrap(); }
+        {
+            let mut event = writer.make_writer();
+            event.write_all(&vec![b'x'; MAX_EVENT + 1]).unwrap();
+        }
         assert!(matches!(rx.try_recv(), Ok(Message::Data(bytes)) if bytes.len() == MAX_EVENT));
         assert_eq!(writer.truncated.load(Ordering::Relaxed), 1);
     }

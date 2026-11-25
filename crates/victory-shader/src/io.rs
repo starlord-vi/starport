@@ -441,8 +441,16 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
     // hardware interpolation for pairs whose intermediate is otherwise dead.
     for (b, block) in p.blocks.iter().enumerate() {
         for (i, inst) in block.insts.iter().enumerate() {
-            if !inst.name().starts_with("v_interp_p1") || io.interps.iter().any(|(site, _)| *site == (b, i)) { continue; }
-            let value = inst.writes.iter().find(|(reg, _)| matches!(reg, Reg::V(_))).map(|(_, value)| *value);
+            if !inst.name().starts_with("v_interp_p1")
+                || io.interps.iter().any(|(site, _)| *site == (b, i))
+            {
+                continue;
+            }
+            let value = inst
+                .writes
+                .iter()
+                .find(|(reg, _)| matches!(reg, Reg::V(_)))
+                .map(|(_, value)| *value);
             let needed = value.is_some_and(|value| p.blocks.iter().flat_map(|b| &b.insts).any(|use_| {
                 if !use_.reads.iter().any(|(_, read)| *read == value) { return false; }
                 match &use_.fields {
@@ -459,7 +467,12 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
                     Fields::Valu(v) => &v.src[0],
                     _ => unreachable!(),
                 };
-                io.interps.push(((b, i), Interp::Weighted { attribute: attribute(inst, attr)? }));
+                io.interps.push((
+                    (b, i),
+                    Interp::Weighted {
+                        attribute: attribute(inst, attr)?,
+                    },
+                ));
             }
         }
     }
@@ -722,13 +735,24 @@ mod tests {
     #[test]
     fn packed_second_half_keeps_the_first_half_available_as_a_value() {
         let p = program(&[
-            0xD742_0002, 0x0002_0100, // p1ll_f16 v2, attr0.x high, v0
-            0xD75A_0002, 0x040A_0300, // p2_f16 v2, attr0.x high, v1, v2
+            0xD742_0002,
+            0x0002_0100, // p1ll_f16 v2, attr0.x high, v0
+            0xD75A_0002,
+            0x040A_0300, // p2_f16 v2, attr0.x high, v1, v2
             S_ENDPGM,
         ]);
         let io = raise(&p, &pixel(vec![TEXCOORD], 2)).unwrap();
-        assert!(io.interps.iter().any(|(site, interp)| *site == (0, 0) && matches!(interp, Interp::Weighted { .. })));
-        assert!(io.interps.iter().any(|(site, interp)| *site == (0, 1) && matches!(interp, Interp::Interpolated { .. })));
+        assert!(
+            io.interps
+                .iter()
+                .any(|(site, interp)| *site == (0, 0) && matches!(interp, Interp::Weighted { .. }))
+        );
+        assert!(
+            io.interps
+                .iter()
+                .any(|(site, interp)| *site == (0, 1)
+                    && matches!(interp, Interp::Interpolated { .. }))
+        );
     }
 
     #[test]
@@ -910,5 +934,4 @@ mod tests {
             )]
         );
     }
-
 }

@@ -78,7 +78,8 @@ static SHADERS: Mutex<Option<HashMap<[u8; 32], Arc<Shader>>>> = Mutex::new(None)
 
 /// For the memory lines: containers kept and their bytes, translations
 /// kept and the bytes of their host code. None of them is ever let go.
-static KEPT: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+static KEPT: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 /// What the shader table and the pipeline library keep in memory:
 /// containers and their bytes, translations and their bytes, the bytes of
@@ -111,8 +112,10 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
             KEPT[1].fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             Arc::new(Shader {
                 #[cfg(windows)]
-                resolves_light: stage == "compute" && bytes.windows(crate::ambient::PROGRAM.len())
-                    .any(|part| part == crate::ambient::PROGRAM),
+                resolves_light: stage == "compute"
+                    && bytes
+                        .windows(crate::ambient::PROGRAM.len())
+                        .any(|part| part == crate::ambient::PROGRAM),
                 stage,
                 hash: full.to_hex()[..16].to_owned(),
                 container: bytes.to_vec(),
@@ -154,7 +157,10 @@ impl Shader {
                 }
                 if let Ok(t) = &done {
                     KEPT[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    KEPT[3].fetch_add(t.host.dxil.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    KEPT[3].fetch_add(
+                        t.host.dxil.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 match &done {
                     Ok(t) => tracing::info!(
@@ -265,7 +271,8 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 #[cfg(windows)]
 pub(crate) fn builder_quarantined(this: This) -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    is_builder(this) && *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
+    is_builder(this)
+        && *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
 }
 
 /// Whether the title's pipeline `this` is one of the structure builder's.
@@ -280,7 +287,10 @@ pub(crate) fn builder_off(why: &'static str) {
     let mut b = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
     if !b.off {
         b.off = true;
-        tracing::warn!(why, "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none");
+        tracing::warn!(
+            why,
+            "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none"
+        );
     }
 }
 
@@ -474,7 +484,10 @@ pub(crate) fn note_drop(this: This) {
 pub(crate) fn note_why(why: String) {
     crate::capture::op(0, || format!("DROPPED {why}"));
     let mut drops = DROPS.lock().unwrap_or_else(|e| e.into_inner());
-    *drops.get_or_insert_with(HashMap::new).entry(why).or_default() += 1;
+    *drops
+        .get_or_insert_with(HashMap::new)
+        .entry(why)
+        .or_default() += 1;
 }
 
 /// The drops counted since the last call, most first (diagnostics).

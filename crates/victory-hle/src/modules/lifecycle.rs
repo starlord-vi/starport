@@ -211,10 +211,14 @@ pub fn stop_after(seconds: u64) {
 static BEFORE_EXIT: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
 /// A host-side flush hook, called after title suspension and before exit.
-pub fn before_exit(callback: fn()) { let _ = BEFORE_EXIT.set(callback); }
+pub fn before_exit(callback: fn()) {
+    let _ = BEFORE_EXIT.set(callback);
+}
 
 pub(crate) fn flush_before_exit() {
-    if let Some(callback) = BEFORE_EXIT.get() { callback(); }
+    if let Some(callback) = BEFORE_EXIT.get() {
+        callback();
+    }
 }
 
 pub(crate) fn end_title(why: &'static str, then: Box<dyn FnOnce() + Send>) {

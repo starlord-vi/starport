@@ -260,7 +260,9 @@ fn package_name(path: &[u16]) -> bool {
 }
 
 fn package_w(path: *const u16) -> bool {
-    if path.is_null() { return false; }
+    if path.is_null() {
+        return false;
+    }
     // SAFETY: the title passes a NUL-terminated path, as for the forwarded API.
     let path = unsafe {
         let len = (0..).take_while(|&i| *path.add(i) != 0).count();
@@ -270,7 +272,9 @@ fn package_w(path: *const u16) -> bool {
 }
 
 fn package_a(path: *const c_char) -> bool {
-    if path.is_null() { return false; }
+    if path.is_null() {
+        return false;
+    }
     // SAFETY: the title passes a NUL-terminated path.
     let bytes = unsafe { CStr::from_ptr(path) }.to_bytes();
     let bytes = bytes.strip_prefix(br"\\?\").unwrap_or(bytes);
@@ -280,7 +284,9 @@ fn package_a(path: *const c_char) -> bool {
 fn denied(package: bool) -> bool {
     if package {
         // SAFETY: per-thread error state, matching Win32/CRT failure contracts.
-        unsafe { windows_sys::Win32::Foundation::SetLastError(5); }
+        unsafe {
+            windows_sys::Win32::Foundation::SetLastError(5);
+        }
         host!("ucrtbase.dll", "_set_errno": extern "C" fn(i32) -> i32)(13);
     }
     package
@@ -292,11 +298,18 @@ fn writable_open(access: u32, disposition: u32, flags: u32) -> bool {
 }
 
 fn writable_mode(mode: *const u16) -> bool {
-    if mode.is_null() { return true; }
+    if mode.is_null() {
+        return true;
+    }
     // SAFETY: a NUL-terminated CRT mode. Only a plain read mode is allowed.
     unsafe {
-        if *mode != u16::from(b'r') { return true; }
-        (0..).map(|i| *mode.add(i)).take_while(|&c| c != 0).any(|c| c == b'+' as u16)
+        if *mode != u16::from(b'r') {
+            return true;
+        }
+        (0..)
+            .map(|i| *mode.add(i))
+            .take_while(|&c| c != 0)
+            .any(|c| c == b'+' as u16)
     }
 }
 
@@ -376,8 +389,16 @@ pub extern "system" fn CreateFile2(
     // Read only the flags field when the supplied structure includes it.
     let flags = if !params.is_null() {
         // SAFETY: the API requires an initialized structure at `params`.
-        unsafe { if *(params as *const u32) >= 12 { *(params as *const u32).add(2) } else { 0 } }
-    } else { 0 };
+        unsafe {
+            if *(params as *const u32) >= 12 {
+                *(params as *const u32).add(2)
+            } else {
+                0
+            }
+        }
+    } else {
+        0
+    };
     if denied(package_w(path) && writable_open(access, disposition, flags)) {
         return -1isize as Handle;
     }
@@ -392,7 +413,9 @@ pub extern "system" fn CreateFile2(
 }
 
 pub extern "system" fn DeleteFileA(path: *const c_char) -> i32 {
-    if denied(package_a(path)) { return 0; }
+    if denied(package_a(path)) {
+        return 0;
+    }
     match narrow(path) {
         Some(p) => {
             host!("kernel32.dll", "DeleteFileW": extern "system" fn(*const u16) -> i32)(p.as_ptr())
@@ -404,19 +427,25 @@ pub extern "system" fn DeleteFileA(path: *const c_char) -> i32 {
 }
 
 pub extern "system" fn DeleteFileW(path: *const u16) -> i32 {
-    if denied(package_w(path)) { return 0; }
+    if denied(package_w(path)) {
+        return 0;
+    }
     let p = wide(path);
     host!("kernel32.dll", "DeleteFileW": extern "system" fn(*const u16) -> i32)(p.ptr())
 }
 
 pub extern "system" fn RemoveDirectoryW(path: *const u16) -> i32 {
-    if denied(package_w(path)) { return 0; }
+    if denied(package_w(path)) {
+        return 0;
+    }
     let p = wide(path);
     host!("kernel32.dll", "RemoveDirectoryW": extern "system" fn(*const u16) -> i32)(p.ptr())
 }
 
 pub extern "system" fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32 {
-    if denied(package_w(path)) { return 0; }
+    if denied(package_w(path)) {
+        return 0;
+    }
     let p = wide(path);
     host!("kernel32.dll", "SetFileAttributesW": extern "system" fn(*const u16, u32) -> i32)(
         p.ptr(),
@@ -440,7 +469,9 @@ pub extern "system" fn GetFileAttributesA(path: *const c_char) -> u32 {
 }
 
 pub extern "system" fn CreateDirectoryW(path: *const u16, security: *const c_void) -> i32 {
-    if denied(package_w(path)) { return 0; }
+    if denied(package_w(path)) {
+        return 0;
+    }
     let p = wide(path);
     host!("kernel32.dll", "CreateDirectoryW": extern "system" fn(*const u16, *const c_void) -> i32)(
         p.ptr(),
@@ -535,7 +566,9 @@ pub extern "system" fn FindFirstFileExW(
 }
 
 pub extern "system" fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32 {
-    if denied(package_w(from) || package_w(to)) { return 0; }
+    if denied(package_w(from) || package_w(to)) {
+        return 0;
+    }
     let (from, to) = (wide(from), wide(to));
     host!("kernel32.dll", "MoveFileExW": extern "system" fn(*const u16, *const u16, u32) -> i32)(
         from.ptr(),
@@ -562,14 +595,20 @@ pub extern "system" fn SetCurrentDirectoryA(path: *const c_char) -> i32 {
 // The C runtime (ucrtbase, which the title's CRT imports bind to).
 
 pub extern "C" fn _wfopen(path: *const u16, mode: *const u16) -> File {
-    if denied(package_w(path) && writable_mode(mode)) { return std::ptr::null_mut(); }
+    if denied(package_w(path) && writable_mode(mode)) {
+        return std::ptr::null_mut();
+    }
     let p = wide(path);
     host!("ucrtbase.dll", "_wfopen": extern "C" fn(*const u16, *const u16) -> File)(p.ptr(), mode)
 }
 
 pub extern "C" fn _wfopen_s(out: *mut File, path: *const u16, mode: *const u16) -> i32 {
     if denied(package_w(path) && writable_mode(mode)) {
-        if !out.is_null() { unsafe { out.write(std::ptr::null_mut()); } }
+        if !out.is_null() {
+            unsafe {
+                out.write(std::ptr::null_mut());
+            }
+        }
         return 13;
     }
     let p = wide(path);
@@ -581,7 +620,9 @@ pub extern "C" fn _wfopen_s(out: *mut File, path: *const u16, mode: *const u16) 
 }
 
 pub extern "C" fn _wfsopen(path: *const u16, mode: *const u16, share: i32) -> File {
-    if denied(package_w(path) && writable_mode(mode)) { return std::ptr::null_mut(); }
+    if denied(package_w(path) && writable_mode(mode)) {
+        return std::ptr::null_mut();
+    }
     let p = wide(path);
     host!("ucrtbase.dll", "_wfsopen": extern "C" fn(*const u16, *const u16, i32) -> File)(
         p.ptr(),
@@ -619,7 +660,9 @@ pub extern "C" fn fread(buffer: *mut u8, size: usize, count: usize, stream: File
 }
 
 pub extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> File {
-    if denied(package_a(path) && writable_mode(widen(mode).as_ptr())) { return std::ptr::null_mut(); }
+    if denied(package_a(path) && writable_mode(widen(mode).as_ptr())) {
+        return std::ptr::null_mut();
+    }
     match narrow(path) {
         Some(p) => host!("ucrtbase.dll", "_wfopen": extern "C" fn(*const u16, *const u16) -> File)(
             p.as_ptr(),
@@ -635,7 +678,11 @@ pub extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> File {
 
 pub extern "C" fn fopen_s(out: *mut File, path: *const c_char, mode: *const c_char) -> i32 {
     if denied(package_a(path) && writable_mode(widen(mode).as_ptr())) {
-        if !out.is_null() { unsafe { out.write(std::ptr::null_mut()); } }
+        if !out.is_null() {
+            unsafe {
+                out.write(std::ptr::null_mut());
+            }
+        }
         return 13;
     }
     match narrow(path) {
@@ -657,7 +704,9 @@ pub extern "C" fn fopen_s(out: *mut File, path: *const c_char, mode: *const c_ch
 /// `_open(path, flags[, mode])` is variadic; on x64 the optional integer
 /// travels in the same register either way, so it is passed on as is.
 pub extern "C" fn _open(path: *const c_char, flags: i32, mode: i32) -> i32 {
-    if denied(package_a(path) && flags & (3 | 0x100 | 0x200 | 0x400 | 0x40) != 0) { return -1; }
+    if denied(package_a(path) && flags & (3 | 0x100 | 0x200 | 0x400 | 0x40) != 0) {
+        return -1;
+    }
     match narrow(path) {
         Some(p) => host!("ucrtbase.dll", "_wopen": extern "C" fn(*const u16, i32, i32) -> i32)(
             p.as_ptr(),
@@ -672,7 +721,9 @@ pub extern "C" fn _open(path: *const c_char, flags: i32, mode: i32) -> i32 {
 
 /// See [`_open`]; used by libHttpClient.
 pub extern "C" fn _wopen(path: *const u16, flags: i32, mode: i32) -> i32 {
-    if denied(package_w(path) && flags & (3 | 0x100 | 0x200 | 0x400 | 0x40) != 0) { return -1; }
+    if denied(package_w(path) && flags & (3 | 0x100 | 0x200 | 0x400 | 0x40) != 0) {
+        return -1;
+    }
     let p = wide(path);
     host!("ucrtbase.dll", "_wopen": extern "C" fn(*const u16, i32, i32) -> i32)(
         p.ptr(),
@@ -703,7 +754,9 @@ pub extern "C" fn _stat64i32(path: *const c_char, stat: *mut c_void) -> i32 {
 }
 
 pub extern "C" fn remove(path: *const c_char) -> i32 {
-    if denied(package_a(path)) { return -1; }
+    if denied(package_a(path)) {
+        return -1;
+    }
     match narrow(path) {
         Some(p) => host!("ucrtbase.dll", "_wremove": extern "C" fn(*const u16) -> i32)(p.as_ptr()),
         None => host!("ucrtbase.dll", "remove": extern "C" fn(*const c_char) -> i32)(path),
@@ -711,13 +764,17 @@ pub extern "C" fn remove(path: *const c_char) -> i32 {
 }
 
 pub extern "C" fn _wchmod(path: *const u16, mode: i32) -> i32 {
-    if denied(package_w(path)) { return -1; }
+    if denied(package_w(path)) {
+        return -1;
+    }
     let p = wide(path);
     host!("ucrtbase.dll", "_wchmod": extern "C" fn(*const u16, i32) -> i32)(p.ptr(), mode)
 }
 
 pub extern "C" fn _wutime64(path: *const u16, times: *mut c_void) -> i32 {
-    if denied(package_w(path)) { return -1; }
+    if denied(package_w(path)) {
+        return -1;
+    }
     let p = wide(path);
     host!("ucrtbase.dll", "_wutime64": extern "C" fn(*const u16, *mut c_void) -> i32)(
         p.ptr(),
@@ -732,7 +789,9 @@ const FIOPEN_WIDE: &str = "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z";
 
 /// `_Fiopen(const wchar_t* path, ios_base::openmode, int protection)`.
 extern "C" fn fiopen_wide(path: *const u16, mode: i32, protection: i32) -> File {
-    if denied(package_w(path) && mode & (2 | 8 | 0x10) != 0) { return std::ptr::null_mut(); }
+    if denied(package_w(path) && mode & (2 | 8 | 0x10) != 0) {
+        return std::ptr::null_mut();
+    }
     let p = wide(path);
     host!("msvcp140.dll", "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z": extern "C" fn(*const u16, i32, i32) -> File)(
         p.ptr(),
@@ -743,7 +802,9 @@ extern "C" fn fiopen_wide(path: *const u16, mode: i32, protection: i32) -> File 
 
 /// `_Fiopen(const char* path, ios_base::openmode, int protection)`.
 extern "C" fn fiopen(path: *const c_char, mode: i32, protection: i32) -> File {
-    if denied(package_a(path) && mode & (2 | 8 | 0x10) != 0) { return std::ptr::null_mut(); }
+    if denied(package_a(path) && mode & (2 | 8 | 0x10) != 0) {
+        return std::ptr::null_mut();
+    }
     match narrow(path) {
         Some(p) => {
             host!("msvcp140.dll", "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z": extern "C" fn(*const u16, i32, i32) -> File)(
@@ -835,7 +896,10 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let (mut out, mut n) = ([0u8; 10], 0);
         let handle = file.as_raw_handle().cast();
-        assert_ne!(ReadFile(handle, out.as_mut_ptr(), 10, &mut n, std::ptr::null_mut()), 0);
+        assert_ne!(
+            ReadFile(handle, out.as_mut_ptr(), 10, &mut n, std::ptr::null_mut()),
+            0
+        );
         assert_eq!((&out, n), (b"0123456789", 10));
     }
 
@@ -901,15 +965,43 @@ mod tests {
         let path = w("G:\\sentinel");
         let narrow = c"g:/sentinel";
         let invalid = -1isize as Handle;
-        for (access, disposition, flags) in [(0x40000000, 3, 0), (0x80000000, 2, 0),
-            (0x80000000, 3, 0x04000000), (2, 3, 0), (0x10000, 3, 0)] {
-            assert_eq!(CreateFileW(path.as_ptr(), access, 1, std::ptr::null(),
-                disposition, flags, std::ptr::null_mut()), invalid);
+        for (access, disposition, flags) in [
+            (0x40000000, 3, 0),
+            (0x80000000, 2, 0),
+            (0x80000000, 3, 0x04000000),
+            (2, 3, 0),
+            (0x10000, 3, 0),
+        ] {
+            assert_eq!(
+                CreateFileW(
+                    path.as_ptr(),
+                    access,
+                    1,
+                    std::ptr::null(),
+                    disposition,
+                    flags,
+                    std::ptr::null_mut()
+                ),
+                invalid
+            );
             assert_eq!(unsafe { GetLastError() }, 5);
-            assert_eq!(CreateFileA(narrow.as_ptr(), access, 1, std::ptr::null(),
-                disposition, flags, std::ptr::null_mut()), invalid);
+            assert_eq!(
+                CreateFileA(
+                    narrow.as_ptr(),
+                    access,
+                    1,
+                    std::ptr::null(),
+                    disposition,
+                    flags,
+                    std::ptr::null_mut()
+                ),
+                invalid
+            );
         }
-        assert_eq!(CreateFile2(path.as_ptr(), 0x40000000, 1, 3, std::ptr::null()), invalid);
+        assert_eq!(
+            CreateFile2(path.as_ptr(), 0x40000000, 1, 3, std::ptr::null()),
+            invalid
+        );
         assert!(_wfopen(path.as_ptr(), w("r+b").as_ptr()).is_null());
         assert!(fopen(narrow.as_ptr(), c"wb".as_ptr()).is_null());
         assert_eq!(_open(narrow.as_ptr(), 2, 0), -1);
@@ -919,14 +1011,24 @@ mod tests {
         assert_eq!(SetFileAttributesW(path.as_ptr(), 1), 0);
         assert_eq!(MoveFileExW(path.as_ptr(), w("G:\\moved").as_ptr(), 0), 0);
         assert_eq!(remove(narrow.as_ptr()), -1);
-        let file = CreateFileW(path.as_ptr(), 0x80000000, 1, std::ptr::null(), 3, 0,
-            std::ptr::null_mut());
+        let file = CreateFileW(
+            path.as_ptr(),
+            0x80000000,
+            1,
+            std::ptr::null(),
+            3,
+            0,
+            std::ptr::null_mut(),
+        );
         assert_ne!(file, invalid);
         assert_ne!(unsafe { CloseHandle(file) }, 0);
         let file = fiopen_wide(path.as_ptr(), 1, 0x40);
         assert!(!file.is_null(), "C++ input-only streams still open");
         host!("ucrtbase.dll", "fclose": extern "C" fn(File) -> i32)(file);
-        assert_eq!(std::fs::read(dir.path().join("sentinel")).unwrap(), b"original bytes");
+        assert_eq!(
+            std::fs::read(dir.path().join("sentinel")).unwrap(),
+            b"original bytes"
+        );
         assert!(package_name(&w(r"\\?\g:\sentinel")));
         assert!(!package_name(&w("T:\\save")));
     }

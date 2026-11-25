@@ -120,7 +120,9 @@ trait Source: Send {
     /// Keys held down; none while the title's window lacks focus.
     fn keys(&mut self) -> Vec<KeyState>;
     /// Mouse contribution to the keyboard's virtual pad, neutral by default.
-    fn pointer(&mut self) -> PadState { PadState::default() }
+    fn pointer(&mut self) -> PadState {
+        PadState::default()
+    }
     /// Motor speeds: low frequency (left), high frequency (right).
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
@@ -500,7 +502,11 @@ impl State {
         {
             slot.sequence += 1;
             if let Value::Pad(pad) = &value {
-                tracing::debug!(device = index, buttons = pad.buttons, "gamepad state changed");
+                tracing::debug!(
+                    device = index,
+                    buttons = pad.buttons,
+                    "gamepad state changed"
+                );
             }
             if slot.history.len() == HISTORY {
                 slot.history.pop_front();
@@ -556,7 +562,9 @@ static HUB: LazyLock<&'static Hub> = LazyLock::new(|| Hub::start(host()));
 /// Connected devices emitted by our hub belong to the offline local user.
 pub(crate) fn local_device(id: &[u8; 32]) -> bool {
     let state = HUB.state();
-    HUB.devices.iter().zip(&state.slots)
+    HUB.devices
+        .iter()
+        .zip(&state.slots)
         .any(|(device, slot)| slot.connected && device.info.id == *id)
 }
 
@@ -846,7 +854,10 @@ extern "system" fn unregister_callback(this: This, token: u64, timeout: u64) -> 
             return true;
         }
         state = match deadline {
-            None => hub.returned.wait(state).unwrap_or_else(PoisonError::into_inner),
+            None => hub
+                .returned
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner),
             Some(deadline) => {
                 let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                     return false;
@@ -1128,7 +1139,9 @@ mod host {
     static TAPS: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 256]);
 
     pub(super) fn key_event(message: u32, key: usize) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_SYSKEYDOWN, WM_KILLFOCUS};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WM_KEYDOWN, WM_KILLFOCUS, WM_SYSKEYDOWN,
+        };
         if message == WM_KILLFOCUS {
             *lock(&TAPS) = [None; 256];
         } else if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) && key < 256 {
@@ -1187,8 +1200,9 @@ mod host {
 
         fn pad(&mut self, slot: usize) -> Option<PadState> {
             static KEYBOARD_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if *KEYBOARD_ONLY.get_or_init(|| std::env::var_os("VICTORY_INPUT")
-                .is_some_and(|v| v == "keyboard-mouse")) {
+            if *KEYBOARD_ONLY.get_or_init(|| {
+                std::env::var_os("VICTORY_INPUT").is_some_and(|v| v == "keyboard-mouse")
+            }) {
                 return None;
             }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
@@ -1210,7 +1224,9 @@ mod host {
             #[cfg(feature = "diagnostics")]
             if slot == 0 {
                 for vk in scripted() {
-                    if let Some(&(_, button)) = super::FALLBACK_BUTTONS.iter().find(|(key, _)| *key == vk) {
+                    if let Some(&(_, button)) =
+                        super::FALLBACK_BUTTONS.iter().find(|(key, _)| *key == vk)
+                    {
                         pad.buttons |= button;
                     }
                 }
@@ -1646,7 +1662,16 @@ mod tests {
         let mut token = 0;
         let context = (&raw const hub.object).cast_mut().cast();
         assert_eq!(
-            register(&hub.object, std::ptr::null(), GAMEPAD_KIND, 1, 0, context, Some(slow), &mut token),
+            register(
+                &hub.object,
+                std::ptr::null(),
+                GAMEPAD_KIND,
+                1,
+                0,
+                context,
+                Some(slow),
+                &mut token
+            ),
             S_OK
         );
         host.lock().unwrap().pads[1] = Some(PadState::default());
@@ -1655,7 +1680,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let unregister = slot::<extern "system" fn(This, u64, u64) -> bool, _>(&hub.object, 0x68);
-        assert!(!unregister(&hub.object, token, 5000), "times out while it runs");
+        assert!(
+            !unregister(&hub.object, token, 5000),
+            "times out while it runs"
+        );
         let leave = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(50));
             LEAVE.store(true, Ordering::SeqCst);

@@ -945,10 +945,17 @@ mod tests {
             let p = build(w, true);
             let insts = &p.blocks[0].insts;
             let saved = insts[0].write(Reg::S(4)).unwrap();
-            let v7 = p.inputs.iter().find_map(|&(r, v)| (r == Reg::V(7)).then_some(v)).unwrap();
+            let v7 = p
+                .inputs
+                .iter()
+                .find_map(|&(r, v)| (r == Reg::V(7)).then_some(v))
+                .unwrap();
             // ..., v_readlane_b32 s7, v1, 0; s_mov_b64 exec, s[4:5]; s_endpgm
             let total = insts[insts.len() - 3].write(Reg::S(7)).unwrap();
-            (sections(&p, 0)[&0].shapes.get(&total).copied(), Shape::Active(Op::AddH, v7, saved, 0))
+            (
+                sections(&p, 0)[&0].shapes.get(&total).copied(),
+                Shape::Active(Op::AddH, v7, saved, 0),
+            )
         };
         let (found, want) = shape(&words(pairs, quads));
         assert_eq!(found, Some(want));

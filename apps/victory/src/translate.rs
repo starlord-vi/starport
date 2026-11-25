@@ -160,7 +160,10 @@ pub fn run(
     let paths = crate::default_paths(paths)?;
     // `VICTORY_HOST_MAX_WAVE=32`: translate as for a host whose waves have
     // at most 32 lanes (as the runtime does on such a card).
-    if let Some(n) = std::env::var("VICTORY_HOST_MAX_WAVE").ok().and_then(|v| v.parse().ok()) {
+    if let Some(n) = std::env::var("VICTORY_HOST_MAX_WAVE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         victory_shader::emit::set_host_max_wave(n);
     }
     let dll = validate.then(Validator::default_path).flatten();
@@ -351,7 +354,10 @@ fn translate(
         && let Some((dir, texts)) = spec.split_once(';')
     {
         let line = example();
-        if texts.split('|').any(|text| !text.is_empty() && line.contains(text)) {
+        if texts
+            .split('|')
+            .any(|text| !text.is_empty() && line.contains(text))
+        {
             let name: String = source
                 .label()
                 .chars()
@@ -360,7 +366,10 @@ fn translate(
                 .take(70)
                 .collect();
             let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::write(std::path::Path::new(dir).join(format!("{name}.{hash}.cdxil")), &bytes[..]);
+            let _ = std::fs::write(
+                std::path::Path::new(dir).join(format!("{name}.{hash}.cdxil")),
+                &bytes[..],
+            );
         }
     }
     if !lock(seen).insert(code) {
@@ -377,21 +386,36 @@ fn translate(
     // `VICTORY_FAIL_DUMP=<dir>`: the first 3 containers of each failure reason, as the title
     // has them (`.cdxil`), to work on a translator gap offline
     let dump = std::env::var_os("VICTORY_FAIL_DUMP");
-    let before: Option<BTreeMap<String, usize>> = dump.as_ref().map(|_| t.failed.iter().map(|(k, v)| (k.clone(), v.0)).collect());
+    let before: Option<BTreeMap<String, usize>> = dump
+        .as_ref()
+        .map(|_| t.failed.iter().map(|(k, v)| (k.clone(), v.0)).collect());
     translate_programs(&container, programs, &example, t, checks);
     if let (Some(dir), Some(before)) = (dump, before) {
         for (reason, (n, _)) in &t.failed {
             let was = before.get(reason).copied().unwrap_or(0);
             if *n > was && was < 3 {
-                let stem: String = reason.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).take(60).collect();
+                let stem: String = reason
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .take(60)
+                    .collect();
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{stem}_{was}.cdxil")), &bytes[..]);
+                let _ = std::fs::write(
+                    std::path::Path::new(&dir).join(format!("{stem}_{was}.cdxil")),
+                    &bytes[..],
+                );
             }
         }
     }
 }
 
-fn translate_programs(container: &Container, programs: Vec<NativeProgram>, example: &dyn Fn() -> String, t: &mut Tally, checks: &mut Checks) {
+fn translate_programs(
+    container: &Container,
+    programs: Vec<NativeProgram>,
+    example: &dyn Fn() -> String,
+    t: &mut Tally,
+    checks: &mut Checks,
+) {
     for p in programs {
         t.programs += 1;
         match victory_shader::spill::build(&p) {
@@ -490,7 +514,11 @@ fn census_line(label: &str, native: &NativeProgram, p: &ir::Program, shader: &em
     static OUT: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
     let Some(out) = OUT.get_or_init(|| {
         let path = std::env::var_os("VICTORY_SHADER_CENSUS")?;
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
         Some(Mutex::new(file))
     }) else {
         return;
@@ -515,7 +543,12 @@ fn census_line(label: &str, native: &NativeProgram, p: &ir::Program, shader: &em
         console[k] += 1;
     }
     let mut line = format!("{label}\twave64={}", u8::from(native.wave64));
-    for (name, n) in ["c_total", "c_valu", "c_sop", "c_smem", "c_buffer", "c_image", "c_ds", "c_sopp", "c_other"].iter().zip(console) {
+    for (name, n) in [
+        "c_total", "c_valu", "c_sop", "c_smem", "c_buffer", "c_image", "c_ds", "c_sopp", "c_other",
+    ]
+    .iter()
+    .zip(console)
+    {
         line.push_str(&format!("\t{name}={n}"));
     }
     for (name, n) in emit::census::KINDS.iter().zip(census.counts) {
@@ -801,37 +834,66 @@ mod starport_regressions {
     }
 
     fn audit(check_pso: bool) {
-        let inputs = std::env::var("STARPORT_SHADER_INPUTS").expect("semicolon-separated shader paths");
-        let out = PathBuf::from(std::env::var("STARPORT_SHADER_AUDIT_OUT").expect("audit directory outside the repository"));
+        let inputs =
+            std::env::var("STARPORT_SHADER_INPUTS").expect("semicolon-separated shader paths");
+        let out = PathBuf::from(
+            std::env::var("STARPORT_SHADER_AUDIT_OUT")
+                .expect("audit directory outside the repository"),
+        );
         assert!(!out.starts_with(std::env::current_dir().unwrap()));
         std::fs::create_dir_all(&out).unwrap();
-        let wanted = ["e5b2121a02f4f741", "2fd01fca16993001", "6b6db9f1a526daeb",
-            "38bf0814e721a1b3", "2da4beb386509b77", "369cbe906ea72764",
-            "02384a60fda6f2d0", "6b82bc7d22016cb5"];
+        let wanted = [
+            "e5b2121a02f4f741",
+            "2fd01fca16993001",
+            "6b6db9f1a526daeb",
+            "38bf0814e721a1b3",
+            "2da4beb386509b77",
+            "369cbe906ea72764",
+            "02384a60fda6f2d0",
+            "6b82bc7d22016cb5",
+        ];
         let mut found = HashSet::new();
         let mut failures = Vec::new();
         emit::set_host_max_wave(32);
-        let mut validator = Validator::load(Validator::default_path().as_deref()).expect("DXIL validator required");
+        let mut validator =
+            Validator::load(Validator::default_path().as_deref()).expect("DXIL validator required");
         for path in inputs.split(';').filter(|s| !s.is_empty()) {
             let bytes = std::fs::read(path).expect("shader input");
             for source in sources(&bytes) {
-                let Some(bytes) = source.bytes() else { continue; };
-                let Some(size) = bytes.get(24..28).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize) else { continue; };
-                let Some(bytes) = bytes.get(..size) else { continue; };
+                let Some(bytes) = source.bytes() else {
+                    continue;
+                };
+                let Some(size) = bytes
+                    .get(24..28)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+                else {
+                    continue;
+                };
+                let Some(bytes) = bytes.get(..size) else {
+                    continue;
+                };
                 let hash = blake3::hash(bytes).to_hex()[..16].to_owned();
-                if !wanted.contains(&hash.as_str()) || !found.insert(hash.clone()) { continue; }
+                if !wanted.contains(&hash.as_str()) || !found.insert(hash.clone()) {
+                    continue;
+                }
                 std::fs::write(out.join(format!("{hash}.cdxil")), bytes).unwrap();
                 match emit::translate(bytes) {
                     Ok(mut shader) => {
                         let result = validator.validate(&mut shader.dxil);
                         eprintln!("{hash}: DXIL {result:?}");
                         std::fs::write(out.join(format!("{hash}.dxil")), &shader.dxil).unwrap();
-                        if let Err(error) = result { failures.push(format!("{hash}: {error}")); }
+                        if let Err(error) = result {
+                            failures.push(format!("{hash}: {error}"));
+                        }
                         if check_pso && shader.stage == HwStage::Cs {
-                            let host = Host::new(false).expect("hardware device required for PSO validation");
+                            let host = Host::new(false)
+                                .expect("hardware device required for PSO validation");
                             match host.compute_pipeline(&shader) {
                                 Ok(_) => eprintln!("{hash}: NVIDIA compute PSO accepted"),
-                                Err(error) => { eprintln!("{hash}: compute PSO {error}"); failures.push(format!("{hash} PSO: {error}")); }
+                                Err(error) => {
+                                    eprintln!("{hash}: compute PSO {error}");
+                                    failures.push(format!("{hash} PSO: {error}"));
+                                }
                             }
                         }
                     }
@@ -841,14 +903,29 @@ mod starport_regressions {
                         for native in native_programs(c.part(FourCC::DXIL).unwrap().data).unwrap() {
                             let p = victory_shader::spill::build(&native).unwrap();
                             let st = structure::structure(&p);
-                            let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok());
+                            let res =
+                                resource::track(&p, &native.layout, native.stage, st.as_ref().ok());
                             let io = io::raise(&p, &native);
-                            std::fs::write(out.join(format!("{hash}.ir.txt")), format!("{p:#?}\n{res:#?}\n{io:#?}")).unwrap();
-                            let mut compact = format!("inputs {:?}\nlayout {:?}\nused {:?}\n", p.inputs, native.layout, native.used);
+                            std::fs::write(
+                                out.join(format!("{hash}.ir.txt")),
+                                format!("{p:#?}\n{res:#?}\n{io:#?}"),
+                            )
+                            .unwrap();
+                            let mut compact = format!(
+                                "inputs {:?}\nlayout {:?}\nused {:?}\n",
+                                p.inputs, native.layout, native.used
+                            );
                             for (b, block) in p.blocks.iter().enumerate() {
                                 compact.push_str(&format!("block {b} phis {:?}\n", block.phis));
                                 for (i, inst) in block.insts.iter().enumerate() {
-                                    compact.push_str(&format!("({b},{i}) @{:#x} {} {:?} r{:?} w{:?}\n", inst.machine.offset, inst.name(), inst.fields, inst.reads, inst.writes));
+                                    compact.push_str(&format!(
+                                        "({b},{i}) @{:#x} {} {:?} r{:?} w{:?}\n",
+                                        inst.machine.offset,
+                                        inst.name(),
+                                        inst.fields,
+                                        inst.reads,
+                                        inst.writes
+                                    ));
                                 }
                             }
                             compact.push_str(&format!("io {io:#?}\n"));
@@ -859,7 +936,15 @@ mod starport_regressions {
                 }
             }
         }
-        assert_eq!(found.len(), wanted.len(), "missing reported containers: {:?}", wanted.iter().filter(|h| !found.contains(**h)).collect::<Vec<_>>());
+        assert_eq!(
+            found.len(),
+            wanted.len(),
+            "missing reported containers: {:?}",
+            wanted
+                .iter()
+                .filter(|h| !found.contains(**h))
+                .collect::<Vec<_>>()
+        );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

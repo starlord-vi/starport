@@ -104,23 +104,35 @@ fn lower_native(native: &NativeProgram, nonuniform: u32, wave_ops: bool) -> Host
 
 #[test]
 fn implicit_compute_samples_lower_to_explicit_quad_gradients() {
-    for opcode in [0xF080_0F08, 0xF084_0F08] { // sample, sample_b
+    for opcode in [0xF080_0F08, 0xF084_0F08] {
+        // sample, sample_b
         let words = [
-            0xBE84_0300, 0xBE85_0380, // view table s[4:5]
-            0xBE86_0301, 0xBE87_0380, // sampler table s[6:7]
-            0xF40C_0602, 0xFA00_0000, // texture s[24:31]
-            0xF408_0203, 0xFA00_0000, // sampler s[8:11]
-            0xF408_0A02, 0xFA00_0040, // output s[40:43]
-            0x7E04_02F0, 0x7E06_02F0, 0x7E08_02F0, // coordinates/bias 0.5
+            0xBE84_0300,
+            0xBE85_0380, // view table s[4:5]
+            0xBE86_0301,
+            0xBE87_0380, // sampler table s[6:7]
+            0xF40C_0602,
+            0xFA00_0000, // texture s[24:31]
+            0xF408_0203,
+            0xFA00_0000, // sampler s[8:11]
+            0xF408_0A02,
+            0xFA00_0040, // output s[40:43]
+            0x7E04_02F0,
+            0x7E06_02F0,
+            0x7E08_02F0, // coordinates/bias 0.5
             0x7E20_0280, // output byte offset 0
-            opcode, 0x0046_0C02, // image_sample[_b] v12, v2, s24, s8
-            0xE070_1000, 0x800A_0C10, // buffer_store_dword
+            opcode,
+            0x0046_0C02, // image_sample[_b] v12, v2, s24, s8
+            0xE070_1000,
+            0x800A_0C10, // buffer_store_dword
             0xBF81_0000,
         ];
         // Validation is mandatory for this new path, even on a machine
         // where the ordinary GPU-execution checks would skip.
         let shader = build_with_wave_ops(&words, false, true);
-        let mut validator = validator::Validator::load(validator::Validator::default_path().as_deref()).expect("DXIL validator required");
+        let mut validator =
+            validator::Validator::load(validator::Validator::default_path().as_deref())
+                .expect("DXIL validator required");
         validator.validate(&mut shader.dxil.clone()).unwrap();
     }
 }
@@ -128,24 +140,64 @@ fn implicit_compute_samples_lower_to_explicit_quad_gradients() {
 #[test]
 fn size_only_heap_descriptors_use_metadata_without_a_texture_kind_guess() {
     let native = NativeProgram {
-        stage: HwStage::Cs, wave64: false, vgprs: 32,
+        stage: HwStage::Cs,
+        wave64: false,
+        vgprs: 32,
         layout: vec![
-            RootParam { root: RootType::ResourceHeap, table_offset_dwords: 0, sgprs: 1, base_register: 0, user_data: 0, slot: 0 },
-            RootParam { root: RootType::Table, table_offset_dwords: 0, sgprs: 1, base_register: 0, user_data: 1, slot: 1 },
+            RootParam {
+                root: RootType::ResourceHeap,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            },
+            RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 1,
+                slot: 1,
+            },
         ],
-        used: vec![UsedResource { kind: ResourceType::Uav, root: RootType::Table, table_offset_dwords: 0, lower_bound: 0, stride: 0, dwords: 4, user_data: 1, slot: 1 }],
-        io: StageIo::Cs(ComputeIo { rsrc2: 2 << 1, threads: [32, 1, 1] }),
-        code: [0xBE82_0300u32, 0xBE83_0380, 0xBE84_0301, 0xBE85_0380,
-            0xF40C_0401, 0xFA00_0000, // size-only texture s[16:23]
-            0xF408_0202, 0xFA00_0000, // output s[8:11]
+        used: vec![UsedResource {
+            kind: ResourceType::Uav,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 4,
+            user_data: 1,
+            slot: 1,
+        }],
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: 2 << 1,
+            threads: [32, 1, 1],
+        }),
+        code: [
+            0xBE82_0300u32,
+            0xBE83_0380,
+            0xBE84_0301,
+            0xBE85_0380,
+            0xF40C_0401,
+            0xFA00_0000, // size-only texture s[16:23]
+            0xF408_0202,
+            0xFA00_0000, // output s[8:11]
             0x7E00_0212, // v_mov_b32 v0, s18 (width/height bits)
-            0xE070_0000, 0x8002_0000, // store to output
-            0xBF81_0000].into_iter().flat_map(u32::to_le_bytes).collect(),
+            0xE070_0000,
+            0x8002_0000, // store to output
+            0xBF81_0000,
+        ]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect(),
     };
     let shader = lower_native(&native, 0, false);
     assert!(shader.root_srvs.contains(&super::SLOT_TEXTURE_SIZES));
     assert!(!shader.root_srvs.contains(&super::SLOT_STRIDES));
-    let mut validator = validator::Validator::load(validator::Validator::default_path().as_deref()).expect("DXIL validator required");
+    let mut validator = validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("DXIL validator required");
     validator.validate(&mut shader.dxil.clone()).unwrap();
 }
 

@@ -84,10 +84,10 @@ mod bitcode;
 mod container;
 #[cfg(all(test, windows))]
 mod diff_tests;
-#[cfg(all(test, windows))]
-mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
 pub mod host;
+#[cfg(all(test, windows))]
+mod intersect_tests;
 mod lower;
 mod own_bits;
 mod rect;
@@ -100,24 +100,22 @@ pub mod validator;
 mod valu_tests;
 #[cfg(all(test, windows))]
 mod waterfall_tests;
+mod wave;
 #[cfg(all(test, windows))]
 mod wave64_tests;
-mod wave;
 
 use crate::dxbc::{Container, FourCC};
 use crate::native::{HwStage, NativeProgram, RootType};
 use crate::{ShaderError, io, ir, resource, structure};
 
 pub use bitcode::census;
-pub use sampler::StaticSampler;
 pub use lower::set_host_max_wave;
 pub use rect::rect_list_gs;
+pub use sampler::StaticSampler;
 pub use shader::{
-    MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
-    SLOT_STRIDES_COUNT, USER_DATA_SPACE, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
-    SLOT_METADATA_PLANES,
-    SLOT_TEXTURE_SIZES,
-    set_view_heap_limit,
+    MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY,
+    SLOT_METADATA_PLANES, SLOT_STRIDES, SLOT_STRIDES_COUNT, SLOT_TEXTURE_SIZES, USER_DATA_SPACE,
+    USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS, set_view_heap_limit,
 };
 
 /// The loop limit without an override: 2^20.
@@ -163,10 +161,16 @@ pub fn loop_limit() -> u32 {
 /// does).
 pub fn group_sync() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("VICTORY_GROUP_SYNC").ok().as_deref().map(str::trim) {
-        Some("0") => 0,
-        Some("1") => 1,
-        _ => 2,
+    *MODE.get_or_init(|| {
+        match std::env::var("VICTORY_GROUP_SYNC")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("0") => 0,
+            Some("1") => 1,
+            _ => 2,
+        }
     })
 }
 
@@ -348,7 +352,9 @@ pub fn emit(
             Ok(()) => true,
             Err((offset, what)) => {
                 if why {
-                    eprintln!("WAVE64-RETRY local waves: not the allocation idiom at {offset:#x}: {what}");
+                    eprintln!(
+                        "WAVE64-RETRY local waves: not the allocation idiom at {offset:#x}: {what}"
+                    );
                 }
                 false
             }
@@ -392,7 +398,11 @@ pub fn emit(
                 // lane runs, where the two host waves can exchange.
                 // (`VICTORY_WAVE_DEEP_SKIPS=0` and `VICTORY_WAVE_WIDE=0` turn the two off.)
                 let deep_on = std::env::var_os("VICTORY_WAVE_DEEP_SKIPS").is_none_or(|v| v != "0");
-                let deep = if deep_on { form(ir::without_skips(p, true)) } else { None };
+                let deep = if deep_on {
+                    form(ir::without_skips(p, true))
+                } else {
+                    None
+                };
                 if let Some((p, st, io, res)) = &deep {
                     let again = emit_program(c, native, p, st, io, res);
                     report("without skips, scalars followed", &again);
@@ -430,7 +440,13 @@ pub fn emit(
                     && idiom(p, st) == exact
                 {
                     let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
-                    report(&format!("local waves ({}), {name}", if exact { "idiom" } else { "APPROXIMATE" }), &local);
+                    report(
+                        &format!(
+                            "local waves ({}), {name}",
+                            if exact { "idiom" } else { "APPROXIMATE" }
+                        ),
+                        &local,
+                    );
                     if done(&local) {
                         return local.map(|(shader, _)| shader);
                     }
@@ -438,7 +454,14 @@ pub fn emit(
             }
             if idiom(p, st) == exact {
                 let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
-                report(if exact { "local waves (idiom)" } else { "local waves (APPROXIMATE)" }, &local);
+                report(
+                    if exact {
+                        "local waves (idiom)"
+                    } else {
+                        "local waves (APPROXIMATE)"
+                    },
+                    &local,
+                );
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
                 }
@@ -449,8 +472,12 @@ pub fn emit(
             if !strict {
                 for (name, f) in &forms {
                     if let Some((p, st, io, res)) = f {
-                        let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
-                        report(&format!("local waves (APPROXIMATE, any mask), {name}"), &local);
+                        let local =
+                            lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
+                        report(
+                            &format!("local waves (APPROXIMATE, any mask), {name}"),
+                            &local,
+                        );
                         if done(&local) {
                             return local.map(|(shader, _)| shader);
                         }
@@ -553,7 +580,10 @@ fn widen(
             .collect();
         if more.is_empty() {
             if why {
-                eprintln!("WAVE64-WIDE stopped with {} branches wave-wide: a branch around it cannot be", wide.len());
+                eprintln!(
+                    "WAVE64-WIDE stopped with {} branches wave-wide: a branch around it cannot be",
+                    wide.len()
+                );
             }
             return r;
         }
@@ -1091,22 +1121,49 @@ mod tests {
     #[cfg(windows)]
     fn pixel_helper_first_lane_lowering_validates() {
         let words = [
-            0xC808_0000u32, 0xC809_0001, // interpolate v2
+            0xC808_0000u32,
+            0xC809_0001, // interpolate v2
             0x7E00_0502, // v_readfirstlane_b32 s0, v2
             0x7E04_0200, // v_mov_b32 v2, s0
-            0xF800_180F, 0x0202_0202, // export v2
+            0xF800_180F,
+            0x0202_0202, // export v2
             0xBF81_0000,
         ];
-        let native = NativeProgram { stage: HwStage::Ps, wave64: false, vgprs: 4,
-            layout: vec![], used: vec![],
-            io: StageIo::Ps { inputs: vec![crate::native::PsInput {
-                usage: crate::native::Usage::Generic, row: 0, mask: 15, attr: 0,
-                flat: false, fp16: false, pack2: false, row2: 0,
-            }], input_addr: 1 << 1, db_shader_control: 0, patches: vec![] },
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 4,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ps {
+                inputs: vec![crate::native::PsInput {
+                    usage: crate::native::Usage::Generic,
+                    row: 0,
+                    mask: 15,
+                    attr: 0,
+                    flat: false,
+                    fp16: false,
+                    pack2: false,
+                    row2: 0,
+                }],
+                input_addr: 1 << 1,
+                db_shader_control: 0,
+                patches: vec![],
+            },
             code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
         };
-        let el = |name: &str, kind, usage| SigElement { name: name.into(), index: 0,
-            kind, comp: 9, interp: 0, row: Some(0), col: 0, cols: 4, usage, half: false };
+        let el = |name: &str, kind, usage| SigElement {
+            name: name.into(),
+            index: 0,
+            kind,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 4,
+            usage,
+            half: false,
+        };
         let input = container::signature(&[el("TEXCOORD", 0, 0)], true);
         let output = container::signature(&[el("SV_Target", 16, 15)], false);
         let bytes = crate::dxbc::build(&[(FourCC::ISG1, &input), (FourCC::OSG1, &output)]);
@@ -1117,7 +1174,8 @@ mod tests {
         let io = io::raise(&p, &native).unwrap();
         let mut out = emit(&c, &native, &p, &st, &io, &res).unwrap();
         let path = super::validator::Validator::default_path();
-        let mut validator = super::validator::Validator::load(path.as_deref()).expect("DXIL validator required");
+        let mut validator =
+            super::validator::Validator::load(path.as_deref()).expect("DXIL validator required");
         validator.validate(&mut out.dxil).unwrap();
     }
 
@@ -1177,8 +1235,7 @@ mod tests {
             let c = super::Container::parse(&bytes).unwrap();
             let p = crate::ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
             let st = crate::structure::structure(&p).unwrap();
-            let res =
-                crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
             let io = crate::io::raise(&p, &native).unwrap();
             let out = super::emit(&c, &native, &p, &st, &io, &res).unwrap();
             // dxil.dll, where there is one, checks PSV0 against the module.
