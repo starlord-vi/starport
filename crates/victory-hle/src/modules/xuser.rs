@@ -1,7 +1,7 @@
 //! XUser: one offline local user, signed in, never a guest, with every
 //! privilege. Served as the user provider's objects from `QueryApiImpl`;
-//! adding a user completes through `xasync` like any other async call. No
-//! input device is associated with the user (there are none, `gameinput`).
+//! adding a user completes through `xasync` like any other async call. Our
+//! connected input devices from our GameInput hub belong to this local user.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{c_char, c_void};
@@ -247,8 +247,7 @@ extern "system" fn token_result(
     xasync::XAsyncGetResult(block, (&raw const TOKEN).cast(), size, buffer, used)
 }
 
-/// The user never changes and no device is ever associated, so these
-/// callbacks are never called.
+/// The offline user is static. User-change callbacks are never called.
 extern "system" fn register(
     _: This,
     _queue: *const c_void,
@@ -262,9 +261,16 @@ extern "system" fn unregister(_: This, _token: u64, _wait: bool) -> bool {
     true
 }
 
-/// No input device belongs to a user.
-extern "system" fn find_for_device(_: This, _device: *const c_void, _: *mut Handle) -> HRESULT {
-    USER_NOT_FOUND
+/// Resolve only the IDs of our connected GameInput devices to the local user.
+extern "system" fn find_for_device(_: This, device: *const c_void, out: *mut Handle) -> HRESULT {
+    if device.is_null() || out.is_null() {
+        return super::xasync::E_INVALIDARG;
+    }
+    // SAFETY: the API takes one 32-byte APP_LOCAL_DEVICE_ID and an output handle.
+    let local = super::gameinput::local_device(unsafe { &*device.cast::<[u8; 32]>() });
+    unsafe { out.write(std::ptr::null()); }
+    tracing::debug!(local, "find user for input device");
+    found(local, out)
 }
 
 // Unset slots (no title seen calls them): maximum users, gamer pictures,
@@ -328,6 +334,20 @@ mod tests {
     use super::*;
     use crate::modules::xasync::E_NOT_SUFFICIENT_BUFFER;
     use crate::modules::xgameruntime::method as slot;
+
+    #[test]
+    fn connected_local_device_resolves_but_unknown_ids_do_not() {
+        let mut id = [0; 32];
+        id[..7].copy_from_slice(b"victory");
+        id[31] = 6; // The hub's always-connected keyboard.
+        let mut handle = std::ptr::null();
+        assert_eq!(find_for_device(&DEVICE_OBJECT, id.as_ptr().cast(), &mut handle), S_OK);
+        assert_eq!(handle, user());
+        id[0] ^= 1;
+        assert_eq!(find_for_device(&DEVICE_OBJECT, id.as_ptr().cast(), &mut handle), USER_NOT_FOUND);
+        assert!(handle.is_null());
+        assert_eq!(find_for_device(&DEVICE_OBJECT, std::ptr::null(), &mut handle), super::super::xasync::E_INVALIDARG);
+    }
 
     #[test]
     fn a_gamertag_without_a_suffix_has_an_empty_modern_suffix() {

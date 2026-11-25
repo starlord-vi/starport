@@ -18,6 +18,8 @@ use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObj
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, PCWSTR, w};
 
+use crate::readback::{CopyRegion, coalesce};
+
 /// Resource states without the console's own bits (compression hints from
 /// bit 25 up), which the host rejects.
 pub(crate) fn pc_state(state: u32) -> u32 {
@@ -75,6 +77,9 @@ static RETIRED: Mutex<Vec<(u64, Retired)>> = Mutex::new(Vec::new());
 /// Submissions started and finished (waited for).
 static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FINISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn started_submission() -> u64 { STARTED.load(Ordering::Acquire) }
+pub(crate) fn finished_submission() -> u64 { FINISHED.load(Ordering::Acquire) }
 
 /// A retired object, dropped on whatever thread finishes the submission.
 struct Retired(#[allow(dead_code)] Box<dyn std::any::Any>);
@@ -148,6 +153,7 @@ fn sweep() {
     crate::shadow::let_go_idle();
     crate::texture::let_go_idle();
     crate::resource::let_go_idle();
+    crate::residency::sweep();
 }
 
 /// Drops `object` once every submission running now has finished: at once
@@ -726,6 +732,9 @@ pub(crate) struct HostList {
     /// list names alive until it is reset, even if the title releases the
     /// resource first.
     states: Mutex<States>,
+    /// Keep the heap's resource census and COM references even if the title
+    /// releases its heap object before submitting this recorded list.
+    resident_heaps: Mutex<std::collections::HashMap<usize, std::sync::Arc<crate::descriptor::host::HostHeap>>>,
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
@@ -1511,6 +1520,38 @@ fn rehash_runs() -> bool {
 /// hashed, and compare passes after the lists.
 static CARD_PASSES: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
+/// Native readback copy commands since the last frame-rate line.
+static CARD_FETCH_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Records the fetch without changing the piece boundaries used on the CPU.
+/// Pieces of the same shadow pass references to the same source buffer field.
+///
+/// # Safety
+/// The caller must have an open list, live source and destination resources
+/// in copy-compatible states, and non-empty piece ranges within both buffers.
+/// The destination must not alias any source. The resources must remain live
+/// until the GPU is done with the copies.
+pub(crate) unsafe fn record_card_readback<'a>(
+    list: &ID3D12GraphicsCommandList,
+    destination: &ID3D12Resource,
+    pieces: impl Iterator<Item = (&'a ID3D12Resource, usize, usize, u64)>,
+) -> u64 {
+    let pieces = pieces.map(|(source, lo, hi, destination_offset)| CopyRegion {
+        source,
+        source_offset: lo as u64,
+        destination_offset,
+        bytes: (hi - lo) as u64,
+    });
+    let mut copies = 0;
+    for copy in coalesce(pieces) {
+        // SAFETY: the caller ensures states and lifetimes, and coalescing
+        // preserves the exact source and destination bytes of the pieces.
+        unsafe { list.CopyBufferRegion(destination, copy.destination_offset, copy.source, copy.source_offset, copy.bytes) };
+        copies += 1;
+    }
+    copies
+}
+
 /// Whether what shaders wrote to copies in the card's memory is merged
 /// into title memory on several threads (`VICTORY_WIDE_MERGE=1`; off by
 /// default). The pieces the card's compare found differing come down in
@@ -1568,7 +1609,7 @@ enum Step {
     GpuWrite(std::sync::Arc<crate::shadow::Shadow>, usize, usize),
     /// Brings a texture's staging buffer up to date: once per submission,
     /// whichever lists sample it, until a `Copy` or `Run` intervenes.
-    Texture(std::sync::Arc<crate::texture::Staging>),
+    Texture(std::sync::Arc<crate::texture::Staging>, std::sync::Arc<crate::resource::HostTexture>),
 }
 
 /// What a list does on the CPU when it is submitted: copies between host
@@ -1581,6 +1622,9 @@ struct Deferred {
     uploads: Vec<ID3D12Resource>,
     /// The bytes of `uploads` (counted in [`ALIVE`] while they are held).
     upload_bytes: u64,
+    /// Immutable texture versions named only by this submission's prelude.
+    /// Replaced when that prelude can be reset, after its GPU use ends.
+    prelude_uploads: Vec<(ID3D12Resource, u64)>,
     /// Host objects the list's commands name (pipelines, root signatures,
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
@@ -1603,6 +1647,17 @@ struct Deferred {
 }
 
 impl Deferred {
+    fn clear_prelude_uploads(&mut self) {
+        ALIVE[6].fetch_sub(self.prelude_uploads.len() as u64, Ordering::Relaxed);
+        ALIVE[7].fetch_sub(self.prelude_uploads.iter().map(|(_, n)| n).sum::<u64>(), Ordering::Relaxed);
+        self.prelude_uploads.clear();
+    }
+
+    fn hold_prelude_upload(&mut self, buffer: ID3D12Resource, bytes: u64) {
+        ALIVE[6].fetch_add(1, Ordering::Relaxed);
+        ALIVE[7].fetch_add(bytes, Ordering::Relaxed);
+        self.prelude_uploads.push((buffer, bytes));
+    }
     /// Holds `buffer` (`size` bytes of upload memory) until the list is
     /// reset.
     fn hold_upload(&mut self, buffer: ID3D12Resource, size: u64) {
@@ -1615,6 +1670,7 @@ impl Deferred {
 
 impl Drop for Deferred {
     fn drop(&mut self) {
+        self.clear_prelude_uploads();
         ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
     }
@@ -2067,7 +2123,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                         return Some(WHY_READ);
                     }
                 }
-                Step::Texture(staging) => {
+                Step::Texture(staging, _) => {
                     let (at, len) = staging.memory();
                     if touches(written, at, at + len) {
                         if count {
@@ -2655,6 +2711,9 @@ fn read_backs(list: &HostList) {
             }
         }
     }
+    // Prelude copies are rebuilt on each submission. Their immutable upload
+    // snapshots are dead now, even if the title keeps the closed list alive.
+    list.deferred().clear_prelude_uploads();
 }
 
 /// After the card ran what declared `back`: what shaders wrote there goes
@@ -2829,6 +2888,7 @@ impl Host {
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 states: Mutex::default(),
+                resident_heaps: Mutex::default(),
                 twins: Mutex::default(),
                 prelude,
                 pipelines: Mutex::default(),
@@ -3303,12 +3363,14 @@ impl Host {
         // buffers (the copies are held by the plans); the fence and the
         // event are this thread's.
         let ran = unsafe {
-            (|| -> windows::core::Result<u64> {
+            (|| -> windows::core::Result<(u64, u64)> {
                 allocator.Reset()?;
                 list.Reset(&allocator, None)?;
-                for (shadow, lo, hi, at) in &pieces {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
-                }
+                let copies = record_card_readback(
+                    &list,
+                    &buffer,
+                    pieces.iter().map(|(shadow, lo, hi, at)| (&shadow.buffer, *lo, *hi, *at)),
+                );
                 list.Close()?;
                 let lists = [Some(list.cast::<ID3D12CommandList>()?)];
                 // In the order of the queue: the sends of title bytes so
@@ -3321,13 +3383,14 @@ impl Host {
                 self.queue.Signal(&fence, sent)?;
                 fence.SetEventOnCompletion(sent, event)?;
                 WaitForSingleObject(event, INFINITE);
-                Ok(after)
+                Ok((after, copies))
             })()
         };
-        let after = match ran {
-            Ok(after) => after,
+        let (after, copies) = match ran {
+            Ok(fetched) => fetched,
             Err(e) => fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e}, VICTORY_RELAY=1)")),
         };
+        CARD_FETCH_COPIES.fetch_add(copies, Ordering::Relaxed);
         let us = waiting.elapsed().as_micros() as u64;
         RELAY_STATS[3].fetch_add(us, Ordering::Relaxed);
         {
@@ -3523,12 +3586,14 @@ impl Host {
             // SAFETY: the list's last run was waited for; live buffers; the
             // fence and event are ours, under the submission lock.
             let ran = unsafe {
-                (|| -> windows::core::Result<()> {
+                (|| -> windows::core::Result<u64> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
-                    for &(i, lo, hi, at) in &pieces {
-                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
-                    }
+                    let copies = record_card_readback(
+                        list,
+                        fetched,
+                        pieces.iter().map(|&(i, lo, hi, at)| (&plan.ranges[i].shadow.buffer, lo, hi, at)),
+                    );
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
                     self.card_sent();
@@ -3539,12 +3604,14 @@ impl Host {
                     WaitForSingleObject(self.event, INFINITE);
                     stood(waiting);
                     working(was_working);
-                    Ok(())
+                    Ok(copies)
                 })()
             };
-            if let Err(e) = ran {
-                fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e})"));
-            }
+            let copies = match ran {
+                Ok(copies) => copies,
+                Err(e) => fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e})")),
+            };
+            CARD_FETCH_COPIES.fetch_add(copies, Ordering::Relaxed);
             {
                 use crate::shadow::CARD_STATS;
                 CARD_STATS[3].fetch_add(pieces.len() as u64, Ordering::Relaxed);
@@ -3860,6 +3927,8 @@ impl Host {
         // One submission at a time from preparation to copy-back: snapshots
         // and the ranges shaders write are per host copy, not per submission.
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(feature = "diagnostics")]
+        let acquired = std::time::Instant::now();
         let was_working = working(true);
         submitting(1, runs.len());
         // Flights in the air ([`late`]): a submission that is waited for
@@ -3901,7 +3970,7 @@ impl Host {
         crate::shadow::preparing(this_submission);
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
-        let lock = (started - called).as_micros() as u64;
+        let lock = (acquired - called).as_micros() as u64;
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::Submissions, 1);
         let mut lists: Vec<Option<ID3D12CommandList>> = Vec::with_capacity(2 * runs.len());
@@ -3978,6 +4047,8 @@ impl Host {
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
+        let resources = runs.iter().flat_map(|list| list.resident_resources()).collect::<Vec<_>>();
+        crate::residency::prepare(resources, this_submission);
         let prepared = std::time::Instant::now();
         if late {
             *submitted += 1;
@@ -4431,6 +4502,7 @@ impl HostList {
         self._alive.used();
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.resident_heaps.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
@@ -4675,15 +4747,54 @@ impl HostList {
         }
     }
 
-    /// At submission: the list that moves each texture this list uses from
-    /// its real state to the one the list starts with; the textures' real
-    /// states become those the list ends with. For depth textures with a
-    /// colour twin it first copies the side the list uses as it finds it
-    /// from the other, if a list submitted earlier left it behind.
+    /// Publish compute-written D16+stencil material masks before their
+    /// same-list lighting consumers. The caller restores guest bindings.
+    pub(crate) fn publish_material_depth(&self) -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("VICTORY_MATERIAL_DEPTH")
+            .is_none_or(|v| v != "late")) { return false; }
+        let mut twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
+        let written: Vec<_> = twins.values_mut()
+            .filter(|u| u.twin.material && u.behind[0] == Some(true))
+            .map(|u| {
+                u.behind[0] = Some(false);
+                u.late = false;
+                (u.depth.clone(), u.twin.clone())
+            }).collect();
+        drop(twins);
+        for (depth, twin) in &written {
+            self.twin_copy(depth, twin, false);
+            self.pass_plane(depth, twin);
+            self.settle(depth, 0x40 | 0x80);
+        }
+        !written.is_empty()
+    }
+
+    /// At submission: transition from actual texture states to the list's
+    /// first states, synchronizing twins and pending CPU texture uploads.
     fn prelude(&self) -> Option<ID3D12CommandList> {
         const COPY_DEST: u32 = 0x400;
         const COPY_SOURCE: u32 = 0x800;
         let host_state = |state: u32| D3D12_RESOURCE_STATES(state as i32);
+        // Same completion requirement as resetting the prelude allocator.
+        self.deferred().clear_prelude_uploads();
+        // Check after run_deferred refreshed the pixels. A decision made
+        // at recording missed CPU updates and replayed older movie frames.
+        // Each copy owns immutable upload bytes until this list is reset.
+        let uploads: Vec<_> = self.deferred().copies.iter().filter_map(|step| {
+            if let Step::Texture(staging, copy) = step {
+                staging.take_upload().map(|upload| (copy.clone(), upload))
+            } else { None }
+        }).collect();
+        let mut upload_to = Vec::new();
+        let mut upload_from = Vec::new();
+        for (copy, _) in &uploads {
+            let real = copy.state.load(Ordering::Relaxed);
+            if real != COPY_DEST {
+                upload_to.push(transition(&copy.texture, host_state(real), host_state(COPY_DEST)));
+                upload_from.push(transition(&copy.texture, host_state(COPY_DEST), host_state(real)));
+            }
+        }
         let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         // The copies (depth texture, twin, whether into the twin); the
         // sides are then as this list leaves them.
@@ -4741,7 +4852,7 @@ impl HostList {
             (real != *first)
                 .then(|| transition(&copy.texture, host_state(real), host_state(*first)))
         }));
-        if barriers.is_empty() && syncs.is_empty() {
+        if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() {
             return None;
         }
         let Some((allocator, list)) = self
@@ -4756,6 +4867,9 @@ impl HostList {
         let recorded = unsafe {
             allocator.Reset().and_then(|()| {
                 list.Reset(allocator, None)?;
+                if !upload_to.is_empty() { list.ResourceBarrier(&upload_to); }
+                for (copy, upload) in &uploads { upload.record(list, &copy.texture); }
+                if !upload_from.is_empty() { list.ResourceBarrier(&upload_from); }
                 if !to_copy.is_empty() {
                     list.ResourceBarrier(&to_copy);
                 }
@@ -4770,6 +4884,9 @@ impl HostList {
         };
         if let Err(e) = recorded {
             fail(format_args!("a host state prelude did not record ({e})"));
+        }
+        for (_, upload) in uploads {
+            self.deferred().hold_prelude_upload(upload.buffer, upload.bytes);
         }
         list.cast().ok()
     }
@@ -5045,6 +5162,22 @@ impl HostList {
         }
     }
 
+    fn resident_resources(&self) -> Vec<usize> {
+        let mut resources: Vec<usize> = self.states.lock().unwrap_or_else(|e| e.into_inner())
+            .values().map(|(_, _, texture)| texture.texture.as_raw() as usize).collect();
+        let kept = self.deferred().kept.clone();
+        resources.extend(self.resident_heaps.lock().unwrap_or_else(|e| e.into_inner())
+            .values().flat_map(|heap| heap.resident_resources()));
+        resources.extend(kept.iter().filter_map(|object| object.cast::<ID3D12Resource>().ok())
+            .map(|resource| resource.as_raw() as usize));
+        resources
+    }
+
+    pub(crate) fn keep_heap(&self, heap: &std::sync::Arc<crate::descriptor::host::HostHeap>) {
+        self.resident_heaps.lock().unwrap_or_else(|e| e.into_inner())
+            .entry(heap.heap.as_raw() as usize).or_insert_with(|| heap.clone());
+    }
+
     /// Whether this is the first time since the reset that the list asks
     /// about `key` (a texture to bring up to date).
     pub(crate) fn first_use(&self, key: usize) -> bool {
@@ -5065,8 +5198,9 @@ impl HostList {
 
     /// Brings a texture's staging buffer up to date when the list is
     /// submitted, keeping it alive until the list is reset.
-    pub(crate) fn defer_texture(&self, staging: std::sync::Arc<crate::texture::Staging>) {
-        self.deferred().copies.push(Step::Texture(staging));
+    pub(crate) fn defer_texture(&self, staging: std::sync::Arc<crate::texture::Staging>,
+        copy: std::sync::Arc<crate::resource::HostTexture>) {
+        self.deferred().copies.push(Step::Texture(staging, copy));
     }
 
     /// Runs the list's submission-time steps; refreshes go into `batch`
@@ -5142,7 +5276,7 @@ impl HostList {
                     }
                     continue;
                 }
-                Step::Texture(staging) => {
+                Step::Texture(staging, _) => {
                     if batch.texture_due(staging) {
                         staging.refresh();
                     }
@@ -5615,6 +5749,10 @@ struct Presenter {
 /// The frame rate, shown in the window's caption every second and logged
 /// every few seconds.
 struct Meter {
+    last_present: std::time::Instant,
+    record_started: std::time::Instant,
+    recorded_draws: u64,
+    recorded_dispatches: u64,
     since: std::time::Instant,
     frames: u32,
     #[cfg(feature = "diagnostics")]
@@ -5629,6 +5767,10 @@ impl Meter {
     fn new() -> Self {
         let now = std::time::Instant::now();
         Meter {
+            last_present: now,
+            record_started: now,
+            recorded_draws: crate::draw::drawn(),
+            recorded_dispatches: crate::draw::dispatched(),
             since: now,
             frames: 0,
             #[cfg(feature = "diagnostics")]
@@ -5641,6 +5783,21 @@ impl Meter {
 
     /// Counts a presented frame.
     fn frame(&mut self, hwnd: HWND) {
+        static RECORD: OnceLock<bool> = OnceLock::new();
+        if *RECORD.get_or_init(|| std::env::var_os("STARPORT_RECORD").is_some_and(|v| v == "1")) {
+            let now = std::time::Instant::now();
+            let draws = crate::draw::drawn();
+            let dispatches = crate::draw::dispatched();
+            tracing::info!(target: "starport::frame", frame = crate::queue::presented(),
+                elapsed_us = now.duration_since(self.record_started).as_micros() as u64,
+                dt_us = now.duration_since(self.last_present).as_micros() as u64,
+                draws = draws.saturating_sub(self.recorded_draws),
+                dispatches = dispatches.saturating_sub(self.recorded_dispatches),
+                "presented");
+            self.last_present = now;
+            self.recorded_draws = draws;
+            self.recorded_dispatches = dispatches;
+        }
         #[cfg(feature = "diagnostics")]
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
         #[cfg(feature = "diagnostics")]
@@ -5730,6 +5887,7 @@ impl Meter {
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
         let card = crate::shadow::card_stats();
+        let fetch_copies = CARD_FETCH_COPIES.swap(0, Ordering::Relaxed) as f64 / frames;
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
         // Over the same frames as the counts above.
@@ -5776,7 +5934,7 @@ impl Meter {
                 tracing::info!(
                     "host copies in the card's memory: {} copies {} MB, their bytes from before {} MB; per frame: \
                      {:.1} MB sent up in {:.0} ranges, {:.0} pieces compared on the card, {:.0} of them fetched \
-                     ({:.1} MB) with {:.1} more waits for the card ({:.1} ms)",
+                     ({:.1} MB) with {:.1} more waits for the card ({:.1} ms) and {fetch_copies:.0} CopyBufferRegion calls",
                     card[7],
                     card[8] >> 20,
                     card[9] >> 20,
@@ -5790,6 +5948,10 @@ impl Meter {
                 );
             }
             tracing::info!(
+                evicted_textures = crate::residency::counters()[0],
+                evicted_texture_bytes = crate::residency::counters()[1],
+                restored_textures = crate::residency::counters()[2],
+                waiting_texture_slots = crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed),
                 "{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                  GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
@@ -5837,7 +5999,8 @@ impl Meter {
             self.caption = Some(buffer);
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let pending = crate::pipeline::making();
+        let text = format!(" | Starport {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame | {pending} pipelines pending");
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,

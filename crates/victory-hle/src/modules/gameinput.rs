@@ -21,6 +21,14 @@ use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
 
+#[cfg(windows)]
+pub(crate) mod mouse;
+
+#[cfg(windows)]
+pub(crate) fn key_event(message: u32, key: usize) {
+    host::key_event(message, key);
+}
+
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
 pub const DEVICE_NOT_FOUND: HRESULT = 0x838A_0002_u32 as i32;
@@ -111,6 +119,8 @@ trait Source: Send {
     fn pad(&mut self, slot: usize) -> Option<PadState>;
     /// Keys held down; none while the title's window lacks focus.
     fn keys(&mut self) -> Vec<KeyState>;
+    /// Mouse contribution to the keyboard's virtual pad, neutral by default.
+    fn pointer(&mut self) -> PadState { PadState::default() }
     /// Motor speeds: low frequency (left), high frequency (right).
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
@@ -401,12 +411,12 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys) = {
+        let (pads, keys, pointer) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
-            (pads, source.keys())
+            (pads, source.keys(), source.pointer())
         };
-        let events = self.state().poll(&self.devices, pads, keys);
+        let events = self.state().poll(&self.devices, pads, keys, pointer);
         self.deliver(events);
     }
 
@@ -451,6 +461,7 @@ impl State {
         devices: &[Device; DEVICES],
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        pointer: PadState,
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
@@ -458,7 +469,14 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then(|| {
+            let mut pad = fallback(&keys);
+            pad.left_trigger = pad.left_trigger.max(pointer.left_trigger);
+            pad.right_trigger = pad.right_trigger.max(pointer.right_trigger);
+            pad.right_x = (pad.right_x + pointer.right_x).clamp(-1.0, 1.0);
+            pad.right_y = (pad.right_y + pointer.right_y).clamp(-1.0, 1.0);
+            Value::Pad(pad)
+        });
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -481,6 +499,9 @@ impl State {
             && (!was || slot.history.back().is_none_or(|r| r.value != value))
         {
             slot.sequence += 1;
+            if let Value::Pad(pad) = &value {
+                tracing::debug!(device = index, buttons = pad.buttons, "gamepad state changed");
+            }
             if slot.history.len() == HISTORY {
                 slot.history.pop_front();
             }
@@ -531,6 +552,13 @@ fn host() -> Box<dyn Source> {
 }
 
 static HUB: LazyLock<&'static Hub> = LazyLock::new(|| Hub::start(host()));
+
+/// Connected devices emitted by our hub belong to the offline local user.
+pub(crate) fn local_device(id: &[u8; 32]) -> bool {
+    let state = HUB.state();
+    HUB.devices.iter().zip(&state.slots)
+        .any(|(device, slot)| slot.connected && device.info.id == *id)
+}
 
 type This = *const Object;
 type Out = *mut *const c_void;
@@ -1015,6 +1043,9 @@ extern "system" fn key_state(this: *const Reading, count: u32, out: *mut KeyStat
 extern "system" fn gamepad_state(this: *const Reading, out: *mut PadState) -> bool {
     match &reading(this).value {
         Value::Pad(state) if !out.is_null() => {
+            if state.buttons != 0 {
+                tracing::debug!(buttons = state.buttons, "gamepad reading consumed by title");
+            }
             // SAFETY: checked non-null.
             unsafe { out.write(*state) };
             true
@@ -1092,6 +1123,23 @@ mod host {
 
     /// Asking XInput about an empty slot is slow; look again this often.
     const EMPTY_SLOT_RECHECK: Duration = Duration::from_secs(1);
+    // A quick press/release can fit entirely between polls. Keep virtual-pad
+    // button taps for 80 ms so a 30 Hz title can observe them as a held button.
+    static TAPS: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 256]);
+
+    pub(super) fn key_event(message: u32, key: usize) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_SYSKEYDOWN, WM_KILLFOCUS};
+        if message == WM_KILLFOCUS {
+            *lock(&TAPS) = [None; 256];
+        } else if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) && key < 256 {
+            lock(&TAPS)[key] = Some(Instant::now());
+            tracing::debug!(key, "title window key down");
+        }
+    }
+
+    fn tapped(at: Option<Instant>, now: Instant) -> bool {
+        at.is_some_and(|at| now.saturating_duration_since(at) < Duration::from_millis(80))
+    }
 
     const BUTTONS: [(u16, u32); 14] = [
         (XINPUT_GAMEPAD_START, MENU),
@@ -1133,7 +1181,16 @@ mod host {
     }
 
     impl Source for Host {
+        fn pointer(&mut self) -> PadState {
+            super::mouse::sample(focused())
+        }
+
         fn pad(&mut self, slot: usize) -> Option<PadState> {
+            static KEYBOARD_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *KEYBOARD_ONLY.get_or_init(|| std::env::var_os("VICTORY_INPUT")
+                .is_some_and(|v| v == "keyboard-mouse")) {
+                return None;
+            }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1167,12 +1224,15 @@ mod host {
             #[cfg(not(feature = "diagnostics"))]
             let mut down = Vec::new();
             if focused() {
+                let taps = *lock(&TAPS);
+                let now = Instant::now();
                 // Left/right modifier keys only, as devices report them; no
                 // mouse buttons (below 0x08).
                 let held: Vec<u8> = (0x08..=0xFE_u8)
                     .filter(|vk| !(0x10..=0x12).contains(vk) && !down.contains(vk))
                     // SAFETY: plain queries.
-                    .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
+                    .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0
+                        || tapped(taps[vk as usize], now))
                     .collect();
                 down.extend(held);
             }
@@ -1245,6 +1305,14 @@ mod host {
             GetWindowThreadProcessId(GetForegroundWindow(), &mut process);
             process == GetCurrentProcessId()
         }
+    }
+
+    #[test]
+    fn quick_taps_expire_and_missing_taps_are_neutral() {
+        let now = Instant::now();
+        assert!(!tapped(None, now));
+        assert!(tapped(Some(now), now + Duration::from_millis(79)));
+        assert!(!tapped(Some(now), now + Duration::from_millis(80)));
     }
 
     #[test]

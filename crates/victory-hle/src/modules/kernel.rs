@@ -11,6 +11,70 @@ use std::ffi::{CStr, c_void};
 
 use crate::{HleModule, HostPolicy, hle_export, registry, runtime};
 
+/// Windows ABI; the console's usable title pool is shared by CPU and GPU.
+#[repr(C)]
+#[derive(Default)]
+#[cfg(windows)]
+pub struct MemoryStatusEx {
+    length: u32,
+    load: u32,
+    total_physical: u64,
+    available_physical: u64,
+    total_pagefile: u64,
+    available_pagefile: u64,
+    total_virtual: u64,
+    available_virtual: u64,
+    available_extended_virtual: u64,
+}
+
+#[cfg(windows)]
+impl MemoryStatusEx {
+    fn guest(budget: usize, used: usize) -> Self {
+        let available = budget.saturating_sub(used) as u64;
+        Self {
+            length: size_of::<Self>() as u32,
+            load: ((used as u128 * 100 / budget.max(1) as u128).min(100)) as u32,
+            total_physical: budget as u64,
+            available_physical: available,
+            total_pagefile: budget as u64,
+            available_pagefile: available,
+            // Address space is not the physical memory pool.
+            total_virtual: (1 << 47) - (1 << 16),
+            available_virtual: ((1u64 << 47) - (1 << 16)).saturating_sub(used as u64),
+            available_extended_virtual: 0,
+        }
+    }
+}
+
+#[cfg(windows)]
+pub extern "system" fn GlobalMemoryStatusEx(out: *mut MemoryStatusEx) -> i32 {
+    // SAFETY: the API requires a sized writable MEMORYSTATUSEX.
+    let Some(out) = (unsafe { out.as_mut() }) else { host::set_last_error(87); return 0; };
+    if out.length as usize != size_of::<MemoryStatusEx>() { host::set_last_error(87); return 0; }
+    *out = MemoryStatusEx::guest(super::xmem::title_budget(), super::xmem::title_usage());
+    1
+}
+
+#[cfg(windows)]
+pub extern "system" fn VirtualAlloc(base: *const c_void, size: usize, kind: u32, protect: u32) -> *mut c_void {
+    // SAFETY: preserve the Windows allocation contract and error reporting.
+    let at = unsafe { windows_sys::Win32::System::Memory::VirtualAlloc(base, size, kind, protect) };
+    if kind & windows_sys::Win32::System::Memory::MEM_RESERVE != 0 || base.is_null() {
+        super::xmem::note_virtual(at, size);
+    }
+    at
+}
+
+#[cfg(windows)]
+pub extern "system" fn VirtualFree(base: *mut c_void, size: usize, kind: u32) -> i32 {
+    // SAFETY: the title's original arguments; native decommits stay tracked.
+    let freed = unsafe { windows_sys::Win32::System::Memory::VirtualFree(base, size, kind) };
+    if freed != 0 && kind & windows_sys::Win32::System::Memory::MEM_RELEASE != 0 {
+        super::xmem::forget_virtual(base);
+    }
+    freed
+}
+
 /// `GetModuleHandleW(NULL)` must return the title's image, not our exe;
 /// title images and our console modules are found by name.
 pub extern "system" fn GetModuleHandleW(name: *const u16) -> *mut c_void {
@@ -360,9 +424,17 @@ pub(crate) fn module() -> HleModule {
             "api-ms-win-core-processthreads-*",
             "api-ms-win-core-debug-*",
             "api-ms-win-core-errorhandling-*",
+            "api-ms-win-core-sysinfo-*",
+            "api-ms-win-core-memory-*",
             "api-ms-win-crt-runtime-*",
         ],
         exports: vec![
+            #[cfg(windows)]
+            hle_export!(GlobalMemoryStatusEx),
+            #[cfg(windows)]
+            hle_export!(VirtualAlloc),
+            #[cfg(windows)]
+            hle_export!(VirtualFree),
             hle_export!(GetModuleHandleW),
             hle_export!(GetModuleHandleA),
             hle_export!(GetModuleFileNameW),
@@ -595,6 +667,27 @@ mod host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn guest_memory_status_uses_the_same_title_pool_for_both_models() {
+        assert_eq!(size_of::<MemoryStatusEx>(), 64);
+        for model in [victory_gpu::console::Console::SeriesS, victory_gpu::console::Console::SeriesX] {
+            let (fast, standard) = model.title_memory();
+            let budget = fast + standard;
+            let status = MemoryStatusEx::guest(budget, budget / 2);
+            assert_eq!(status.total_physical, budget as u64);
+            assert_eq!(status.total_pagefile, status.total_physical);
+            assert_eq!(status.available_physical, (budget - budget / 2) as u64);
+            assert_eq!(status.available_pagefile, status.available_physical);
+            assert_eq!(status.load, 50);
+        }
+        let over = MemoryStatusEx::guest(100, 101);
+        assert_eq!((over.available_physical, over.load), (0, 100));
+        let mut bad = MemoryStatusEx::default();
+        assert_eq!(GlobalMemoryStatusEx(&mut bad), 0);
+        assert_eq!(GlobalMemoryStatusEx(std::ptr::null_mut()), 0);
+    }
 
     #[test]
     fn title_images_report_their_original_path() {

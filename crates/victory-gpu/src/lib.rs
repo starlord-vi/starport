@@ -17,7 +17,11 @@
 
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
+#[cfg(windows)]
+mod ambient;
 pub mod console;
+#[cfg(windows)]
+mod residency;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
 pub mod descriptor;
@@ -40,6 +44,8 @@ pub mod pipeline;
 mod primitive;
 pub mod query;
 pub mod queue;
+#[cfg(any(windows, test))]
+mod readback;
 pub mod resource;
 pub mod root;
 #[cfg(windows)]

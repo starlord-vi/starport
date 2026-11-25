@@ -26,6 +26,11 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 pub const SLOT_STRIDES: u8 = 255;
 /// Dwords of the [`SLOT_STRIDES`] buffer: heap indices are clamped to it.
 pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
+/// Plane 0: buffer stride. Planes 1..=4: texture descriptor size dwords
+/// 1..=4. Size-only descriptor reads need no assumed DXIL texture kind.
+pub const SLOT_METADATA_PLANES: u32 = 5;
+/// Same sidecar as SLOT_STRIDES, without requesting bindless texture uploads.
+pub const SLOT_TEXTURE_SIZES: u8 = 252;
 
 /// Title memory by address (`resource::MEMORY`): console code reads and
 /// writes through raw 40-bit addresses it takes from root constants,

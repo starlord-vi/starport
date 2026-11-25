@@ -115,6 +115,8 @@ pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
     SLOT_STRIDES_COUNT, USER_DATA_SPACE, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
+    SLOT_METADATA_PLANES,
+    SLOT_TEXTURE_SIZES,
     set_view_heap_limit,
 };
 
@@ -1083,6 +1085,40 @@ mod tests {
         let ours = c[4..20].to_vec();
         v.validate(&mut c).unwrap();
         assert_eq!(c[4..20], ours[..], "our hash differs from the validator's");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn pixel_helper_first_lane_lowering_validates() {
+        let words = [
+            0xC808_0000u32, 0xC809_0001, // interpolate v2
+            0x7E00_0502, // v_readfirstlane_b32 s0, v2
+            0x7E04_0200, // v_mov_b32 v2, s0
+            0xF800_180F, 0x0202_0202, // export v2
+            0xBF81_0000,
+        ];
+        let native = NativeProgram { stage: HwStage::Ps, wave64: false, vgprs: 4,
+            layout: vec![], used: vec![],
+            io: StageIo::Ps { inputs: vec![crate::native::PsInput {
+                usage: crate::native::Usage::Generic, row: 0, mask: 15, attr: 0,
+                flat: false, fp16: false, pack2: false, row2: 0,
+            }], input_addr: 1 << 1, db_shader_control: 0, patches: vec![] },
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let el = |name: &str, kind, usage| SigElement { name: name.into(), index: 0,
+            kind, comp: 9, interp: 0, row: Some(0), col: 0, cols: 4, usage, half: false };
+        let input = container::signature(&[el("TEXCOORD", 0, 0)], true);
+        let output = container::signature(&[el("SV_Target", 16, 15)], false);
+        let bytes = crate::dxbc::build(&[(FourCC::ISG1, &input), (FourCC::OSG1, &output)]);
+        let c = Container::parse(&bytes).unwrap();
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let mut out = emit(&c, &native, &p, &st, &io, &res).unwrap();
+        let path = super::validator::Validator::default_path();
+        let mut validator = super::validator::Validator::load(path.as_deref()).expect("DXIL validator required");
+        validator.validate(&mut out.dxil).unwrap();
     }
 
     /// A pixel shader interpolating at sample positions (PERSP_SAMPLE

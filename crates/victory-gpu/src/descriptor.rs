@@ -56,7 +56,7 @@ pub(crate) struct Heap {
     /// descriptor order when a draw first uses them (decision 0007, step
     /// 3); slots written before wait in `pending`.
     #[cfg(windows)]
-    host: std::sync::OnceLock<Option<host::HostHeap>>,
+    host: std::sync::OnceLock<Option<std::sync::Arc<host::HostHeap>>>,
     #[cfg(windows)]
     pending: std::sync::Mutex<Vec<u32>>,
 }
@@ -78,7 +78,7 @@ impl Heap {
     #[cfg(windows)]
     pub(crate) fn host(&self) -> Option<&host::HostHeap> {
         if let Some(h) = self.host.get() {
-            return h.as_ref();
+            return h.as_deref();
         }
         if self.desc.flags & SHADER_VISIBLE == 0 || !matches!(self.desc.kind, VIEWS_KIND | SAMPLERS)
         {
@@ -94,9 +94,15 @@ impl Heap {
                 for i in pending.drain(..) {
                     h.mirror(i, self.start + u64::from(i) * step, false);
                 }
-                Some(h)
+                Some(std::sync::Arc::new(h))
             })
-            .as_ref()
+            .as_deref()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn retained_host(&self) -> Option<std::sync::Arc<host::HostHeap>> {
+        self.host()?;
+        self.host.get()?.clone()
     }
 
     /// The handle of descriptor `index` of this heap.
@@ -1001,6 +1007,25 @@ mod tests {
     fn create(desc: HeapDesc, placement: Placement, out: &mut This) -> HRESULT {
         let extended = Extended(desc, placement);
         create_heap(std::ptr::null(), &extended.0, &HEAP_IIDS[0], out)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recorded_lists_keep_host_heap_residency_after_title_release() {
+        let host = crate::host::host().expect("GPU required for heap lifetime regression");
+        let mut title = std::ptr::null();
+        assert_eq!(create(HeapDesc { kind: 0, count: 4, flags: 1, nodes: 0 },
+            Placement { address: 0, size: 0 }, &mut title), S_OK);
+        let retained = heap(title).retained_host().unwrap();
+        let weak = std::sync::Arc::downgrade(&retained);
+        let list = host.new_list().unwrap();
+        list.keep_heap(&retained);
+        list.close();
+        drop(retained);
+        slot::<extern "system" fn(This) -> u32>(title, 0x10)(title);
+        assert!(weak.upgrade().is_some(), "recorded list owns heap state and its texture references");
+        list.reset();
+        assert!(weak.upgrade().is_none(), "reset after completion releases heap state");
     }
 
     #[test]

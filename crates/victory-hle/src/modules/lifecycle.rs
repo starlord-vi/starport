@@ -160,6 +160,7 @@ fn hook(hwnd: HWND) {
         wm::SetPropW(hwnd, TITLE_PROC, title as *mut c_void);
         wm::SetWindowLongPtrW(hwnd, wm::GWLP_WNDPROC, window_proc as *const () as isize);
     }
+    super::gameinput::mouse::register(hwnd);
 }
 
 extern "system" fn window_proc(
@@ -168,6 +169,10 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    super::gameinput::key_event(message, wparam);
+    if super::gameinput::mouse::message(hwnd, message, wparam, lparam) {
+        return 1;
+    }
     // A user close (close button, Alt+F4, window or taskbar menu); a
     // console title never sees one, nor a WM_CLOSE from it.
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_CLOSE as usize {
@@ -196,6 +201,22 @@ extern "system" fn window_proc(
 
 /// Suspends the title as the console does when it ends it, runs `then`
 /// (once), then ends the process. Returns at once; later calls do nothing.
+pub fn stop_after(seconds: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(seconds));
+        end_title("bounded run finished", Box::new(|| {}));
+    });
+}
+
+static BEFORE_EXIT: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// A host-side flush hook, called after title suspension and before exit.
+pub fn before_exit(callback: fn()) { let _ = BEFORE_EXIT.set(callback); }
+
+pub(crate) fn flush_before_exit() {
+    if let Some(callback) = BEFORE_EXIT.get() { callback(); }
+}
+
 pub(crate) fn end_title(why: &'static str, then: Box<dyn FnOnce() + Send>) {
     static ENDING: AtomicBool = AtomicBool::new(false);
     if ENDING.swap(true, Ordering::SeqCst) {
@@ -212,6 +233,7 @@ pub(crate) fn end_title(why: &'static str, then: Box<dyn FnOnce() + Send>) {
         if let Some(then) = then.take() {
             then();
         }
+        flush_before_exit();
         end();
     };
     let late = finish.clone();

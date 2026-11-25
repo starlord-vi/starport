@@ -10,7 +10,8 @@ pub fn run(
     unimplemented: Unimplemented,
     strict: bool,
     execute: bool,
-    console: Console,
+    console: Option<Console>,
+    seconds: Option<u64>,
 ) -> Result<()> {
     use std::sync::Arc;
     use victory_hle::{HleResolver, HostPolicy};
@@ -18,6 +19,7 @@ pub fn run(
 
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
+    victory_hle::modules::lifecycle::before_exit(victory_core::logging::flush);
     let cfg = victory_core::Config::load()?;
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
     let prepared = victory_loader::prepare(&original)?;
@@ -66,9 +68,11 @@ pub fn run(
     let temp = cfg.data_subdir(&format!("{:08X}/temp", title.id))?;
     victory_hle::modules::files::mount_at('T', &temp);
     victory_hle::runtime::set_title(victory_hle::runtime::Title { storage, ..title });
+    use victory_hle::console::Console as Profile;
     victory_hle::console::set(match console {
-        Console::SeriesX => victory_hle::console::Console::SeriesX,
-        Console::SeriesS => victory_hle::console::Console::SeriesS,
+        Some(Console::SeriesX) => Profile::SeriesX,
+        Some(Console::SeriesS) => Profile::SeriesS,
+        None => Profile::SeriesX.from_environment(),
     });
     println!("console        {}", victory_hle::console::current().name());
     let dlls = victory_loader::load_title_dlls(image.info(), title_dir, &images, &wanted)?;
@@ -124,6 +128,9 @@ pub fn run(
     }));
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
+    if let Some(seconds) = seconds {
+        victory_hle::modules::lifecycle::stop_after(seconds);
+    }
     let code = main
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
@@ -339,6 +346,6 @@ mod tests {
 }
 
 #[cfg(not(windows))]
-pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console) -> Result<()> {
+pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Option<Console>, _: Option<u64>) -> Result<()> {
     anyhow::bail!("running titles requires Windows")
 }

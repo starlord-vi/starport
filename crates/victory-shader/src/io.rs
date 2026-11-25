@@ -340,35 +340,8 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
         },
         ..Io::default()
     };
-    let defs: std::collections::HashMap<Value, Site> = p
-        .blocks
-        .iter()
-        .enumerate()
-        .flat_map(|(b, block)| {
-            block
-                .insts
-                .iter()
-                .enumerate()
-                .flat_map(move |(i, inst)| inst.writes.iter().map(move |w| (w.1, (b, i))))
-        })
-        .collect();
-    let phis: std::collections::HashMap<Value, (usize, usize)> = p
-        .blocks
-        .iter()
-        .enumerate()
-        .flat_map(|(b, block)| {
-            block
-                .phis
-                .iter()
-                .enumerate()
-                .map(move |(i, phi)| (phi.value, (b, i)))
-        })
-        .collect();
-    let halves = Halves {
-        p,
-        defs: &defs,
-        phis: &phis,
-    };
+    // PR #179: build the SSA index only when a second half needs it.
+    let mut halves = None;
     for (b, block) in p.blocks.iter().enumerate() {
         for (i, inst) in block.insts.iter().enumerate() {
             let site = (b, i);
@@ -389,6 +362,7 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
                             };
                             // The first half's result is this one's old dst.
                             let interp = halves
+                                .get_or_insert_with(|| Halves::new(p))
                                 .pair(
                                     attr,
                                     inst.read(Reg::V(d)),
@@ -410,6 +384,7 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
                             _ => None,
                         };
                         let interp = halves
+                            .get_or_insert_with(|| Halves::new(p))
                             .pair(&v.src[0], read(2), read(1), &barycentric)
                             .map_err(|what| unsupported(at, what))?;
                         push_pair(&mut io, site, interp, attribute);
@@ -457,6 +432,34 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
                     });
                 }
                 _ => {}
+            }
+        }
+    }
+    // A first half may also be read as a value. In particular p2_f16
+    // preserves the upper half of its destination; if that is the p1ll
+    // accumulator it needs the actual f32 first-half result. Keep the fast
+    // hardware interpolation for pairs whose intermediate is otherwise dead.
+    for (b, block) in p.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            if !inst.name().starts_with("v_interp_p1") || io.interps.iter().any(|(site, _)| *site == (b, i)) { continue; }
+            let value = inst.writes.iter().find(|(reg, _)| matches!(reg, Reg::V(_))).map(|(_, value)| *value);
+            let needed = value.is_some_and(|value| p.blocks.iter().flat_map(|b| &b.insts).any(|use_| {
+                if !use_.reads.iter().any(|(_, read)| *read == value) { return false; }
+                match &use_.fields {
+                    Fields::Vintrp { .. } if use_.name() == "v_interp_p2_f32" => false,
+                    Fields::Valu(v) if use_.name() == "v_interp_p2_f16" => {
+                        matches!(v.dst, Some(Operand::Vector { reg, .. }) if use_.read(Reg::V(reg)) == Some(value))
+                    }
+                    _ => true,
+                }
+            }));
+            if needed {
+                let attr = match &inst.fields {
+                    Fields::Vintrp { attr, .. } => attr,
+                    Fields::Valu(v) => &v.src[0],
+                    _ => unreachable!(),
+                };
+                io.interps.push(((b, i), Interp::Weighted { attribute: attribute(inst, attr)? }));
             }
         }
     }
@@ -519,11 +522,39 @@ fn push_pair(io: &mut Io, site: Site, pair: Pair, attribute: Attribute) {
 /// Finds the first halves of interpolations.
 struct Halves<'a> {
     p: &'a Program,
-    defs: &'a std::collections::HashMap<Value, Site>,
-    phis: &'a std::collections::HashMap<Value, (usize, usize)>,
+    defs: std::collections::HashMap<Value, Site>,
+    phis: std::collections::HashMap<Value, (usize, usize)>,
 }
 
-impl Halves<'_> {
+impl<'a> Halves<'a> {
+    fn new(p: &'a Program) -> Self {
+        let defs: std::collections::HashMap<Value, Site> = p
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(b, block)| {
+                block
+                    .insts
+                    .iter()
+                    .enumerate()
+                    .flat_map(move |(i, inst)| inst.writes.iter().map(move |w| (w.1, (b, i))))
+            })
+            .collect();
+        let phis: std::collections::HashMap<Value, (usize, usize)> = p
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(b, block)| {
+                block
+                    .phis
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, phi)| (phi.value, (b, i)))
+            })
+            .collect();
+        Self { p, defs, phis }
+    }
+
     /// The interpolation whose second half reads the first half's result
     /// `acc`, the barycentric `j`, and attribute `attr`: every first half
     /// must read the same attribute channel. With j and every first half's
@@ -689,6 +720,18 @@ mod tests {
     }
 
     #[test]
+    fn packed_second_half_keeps_the_first_half_available_as_a_value() {
+        let p = program(&[
+            0xD742_0002, 0x0002_0100, // p1ll_f16 v2, attr0.x high, v0
+            0xD75A_0002, 0x040A_0300, // p2_f16 v2, attr0.x high, v1, v2
+            S_ENDPGM,
+        ]);
+        let io = raise(&p, &pixel(vec![TEXCOORD], 2)).unwrap();
+        assert!(io.interps.iter().any(|(site, interp)| *site == (0, 0) && matches!(interp, Interp::Weighted { .. })));
+        assert!(io.interps.iter().any(|(site, interp)| *site == (0, 1) && matches!(interp, Interp::Interpolated { .. })));
+    }
+
+    #[test]
     fn unpaired_or_unknown_interpolation_fails() {
         // p2 alone: its old dst is no p1's result.
         let lone = program(&[0xC809_0001, S_ENDPGM]); // v_interp_p2_f32 v2, v1, attr0.x
@@ -823,4 +866,49 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn interpolation_can_take_its_first_half_from_either_branch() {
+        let p = program(&[
+            0xBF84_0003, // s_cbranch_scc0 to the second branch
+            0xC808_0000, // v_interp_p1_f32 v2, v0, attr0.x
+            0xC80C_0000, // v_interp_p1_f32 v3, v0, attr0.x
+            0xBF82_0002, // s_branch to the paired p2 instructions
+            0xC808_0000, // v_interp_p1_f32 v2, v0, attr0.x
+            0xC80C_0000, // v_interp_p1_f32 v3, v0, attr0.x
+            0xC809_0001, // v_interp_p2_f32 v2, v1, attr0.x
+            0xC80D_0001, // v_interp_p2_f32 v3, v1, attr0.x
+            S_ENDPGM,
+        ]);
+        let io = raise(&p, &pixel(vec![TEXCOORD], 2)).unwrap();
+        assert_eq!(io.interps.len(), 2);
+        for (i, (site, interp)) in io.interps.iter().enumerate() {
+            assert_eq!(*site, (3, i));
+            let Interp::Interpolated { first, .. } = interp else {
+                panic!("{interp:?}");
+            };
+            assert_eq!(first, &[(1, i), (2, i)]);
+        }
+    }
+
+    #[test]
+    fn vertex_sample_needs_no_second_half() {
+        let p = program(&[0xC80A_0002, S_ENDPGM]); // v_interp_mov_f32 v2, p0, attr0.x
+        let io = raise(&p, &pixel(vec![TEXCOORD], 0)).unwrap();
+        assert_eq!(
+            io.interps,
+            [(
+                (0, 0),
+                Interp::Vertex {
+                    attribute: Attribute {
+                        usage: Usage::Generic,
+                        row: 1,
+                        channel: 0,
+                        high: false,
+                    },
+                    vertex: 2,
+                },
+            )]
+        );
+    }
+
 }

@@ -720,6 +720,64 @@ void main() {
         assert_eq!(run(&mut warp, 2), [0, 0, 0]);
     }
 
+    #[test]
+    fn warp_card_readback_joins_adjacent_copies_and_preserves_bytes() {
+        let Some(mut warp) = WarpHarness::new() else {
+            return;
+        };
+        const SOURCE_BYTES: usize = 64;
+        const DEST_BYTES: usize = 40;
+        const SENTINEL: u8 = 0xa5;
+        let original: [u8; 2 * SOURCE_BYTES] = std::array::from_fn(|i| (i + 1) as u8);
+        let (staging, staged, _) = warp.shared_buffer(original.len() as u64);
+        let (readback, mapped, _) = warp.shared_buffer(DEST_BYTES as u64);
+        let first = warp.default_uav(SOURCE_BYTES as u64);
+        let second = warp.default_uav(SOURCE_BYTES as u64);
+        // SAFETY: both mappings hold the bytes written. The list is open
+        // and the buffers are live and begin in the common state.
+        unsafe {
+            std::ptr::copy_nonoverlapping(original.as_ptr(), staged, original.len());
+            std::ptr::write_bytes(mapped, SENTINEL, DEST_BYTES);
+            warp.list
+                .CopyBufferRegion(&first, 0, &staging, 0, SOURCE_BYTES as u64);
+            warp.list.CopyBufferRegion(
+                &second,
+                0,
+                &staging,
+                SOURCE_BYTES as u64,
+                SOURCE_BYTES as u64,
+            );
+        }
+        warp.submit_and_wait();
+
+        let pieces = [
+            (&first, 3, 9, 1),
+            (&first, 9, 13, 7),
+            (&first, 20, 24, 11),
+            (&second, 24, 28, 15),
+            (&second, 28, 32, 19),
+            (&second, 32, 36, 28),
+        ];
+        // SAFETY: the reset list is open, the buffers have decayed to
+        // common, and each range is within its live buffer.
+        let calls =
+            unsafe { crate::host::record_card_readback(&warp.list, &readback, pieces.into_iter()) };
+        assert_eq!(calls, 4);
+        warp.submit_and_wait();
+
+        let mut expected = [SENTINEL; DEST_BYTES];
+        expected[1..11].copy_from_slice(&original[3..13]);
+        expected[11..15].copy_from_slice(&original[20..24]);
+        expected[15..23].copy_from_slice(&original[SOURCE_BYTES + 24..SOURCE_BYTES + 32]);
+        expected[28..32].copy_from_slice(&original[SOURCE_BYTES + 32..SOURCE_BYTES + 36]);
+        // SAFETY: the copies have finished, and the readback mapping holds
+        // DEST_BYTES bytes.
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(mapped, DEST_BYTES) },
+            expected
+        );
+    }
+
     /// The clamp compiles with the system's compiler and the host takes it.
     #[test]
     fn argument_clamp_builds() {

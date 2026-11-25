@@ -15,8 +15,6 @@ use victory_shader::{
 };
 use victory_shader::{io, resource};
 
-use crate::shader::{MAX_FILE, Source, sources};
-
 #[derive(Default)]
 struct Tally {
     containers: usize,
@@ -783,3 +781,87 @@ fn tally_structured(program: &ir::Program, s: &structure::Structured, t: &mut Ta
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+#[cfg(all(test, windows))]
+mod starport_regressions {
+    use super::*;
+
+    /// Local data stays outside Git. This reads shader containers only;
+    /// it never maps a title executable or executes any title code.
+    #[test]
+    #[ignore = "requires STARPORT_SHADER_INPUTS pointing at locally owned shader data"]
+    fn reported_shaders_validate_offline() {
+        audit(false);
+    }
+
+    #[test]
+    #[ignore = "hardware PSO regression; four Wave64 BVH programs are still unsupported on Wave32"]
+    fn reported_compute_pipelines_validate_offline() {
+        audit(true);
+    }
+
+    fn audit(check_pso: bool) {
+        let inputs = std::env::var("STARPORT_SHADER_INPUTS").expect("semicolon-separated shader paths");
+        let out = PathBuf::from(std::env::var("STARPORT_SHADER_AUDIT_OUT").expect("audit directory outside the repository"));
+        assert!(!out.starts_with(std::env::current_dir().unwrap()));
+        std::fs::create_dir_all(&out).unwrap();
+        let wanted = ["e5b2121a02f4f741", "2fd01fca16993001", "6b6db9f1a526daeb",
+            "38bf0814e721a1b3", "2da4beb386509b77", "369cbe906ea72764",
+            "02384a60fda6f2d0", "6b82bc7d22016cb5"];
+        let mut found = HashSet::new();
+        let mut failures = Vec::new();
+        emit::set_host_max_wave(32);
+        let mut validator = Validator::load(Validator::default_path().as_deref()).expect("DXIL validator required");
+        for path in inputs.split(';').filter(|s| !s.is_empty()) {
+            let bytes = std::fs::read(path).expect("shader input");
+            for source in sources(&bytes) {
+                let Some(bytes) = source.bytes() else { continue; };
+                let Some(size) = bytes.get(24..28).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize) else { continue; };
+                let Some(bytes) = bytes.get(..size) else { continue; };
+                let hash = blake3::hash(bytes).to_hex()[..16].to_owned();
+                if !wanted.contains(&hash.as_str()) || !found.insert(hash.clone()) { continue; }
+                std::fs::write(out.join(format!("{hash}.cdxil")), bytes).unwrap();
+                match emit::translate(bytes) {
+                    Ok(mut shader) => {
+                        let result = validator.validate(&mut shader.dxil);
+                        eprintln!("{hash}: DXIL {result:?}");
+                        std::fs::write(out.join(format!("{hash}.dxil")), &shader.dxil).unwrap();
+                        if let Err(error) = result { failures.push(format!("{hash}: {error}")); }
+                        if check_pso && shader.stage == HwStage::Cs {
+                            let host = Host::new(false).expect("hardware device required for PSO validation");
+                            match host.compute_pipeline(&shader) {
+                                Ok(_) => eprintln!("{hash}: NVIDIA compute PSO accepted"),
+                                Err(error) => { eprintln!("{hash}: compute PSO {error}"); failures.push(format!("{hash} PSO: {error}")); }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("{hash}: {error}");
+                        let c = Container::parse(bytes).unwrap();
+                        for native in native_programs(c.part(FourCC::DXIL).unwrap().data).unwrap() {
+                            let p = victory_shader::spill::build(&native).unwrap();
+                            let st = structure::structure(&p);
+                            let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok());
+                            let io = io::raise(&p, &native);
+                            std::fs::write(out.join(format!("{hash}.ir.txt")), format!("{p:#?}\n{res:#?}\n{io:#?}")).unwrap();
+                            let mut compact = format!("inputs {:?}\nlayout {:?}\nused {:?}\n", p.inputs, native.layout, native.used);
+                            for (b, block) in p.blocks.iter().enumerate() {
+                                compact.push_str(&format!("block {b} phis {:?}\n", block.phis));
+                                for (i, inst) in block.insts.iter().enumerate() {
+                                    compact.push_str(&format!("({b},{i}) @{:#x} {} {:?} r{:?} w{:?}\n", inst.machine.offset, inst.name(), inst.fields, inst.reads, inst.writes));
+                                }
+                            }
+                            compact.push_str(&format!("io {io:#?}\n"));
+                            std::fs::write(out.join(format!("{hash}.ssa.txt")), compact).unwrap();
+                        }
+                        failures.push(format!("{hash}: {error}"));
+                    }
+                }
+            }
+        }
+        assert_eq!(found.len(), wanted.len(), "missing reported containers: {:?}", wanted.iter().filter(|h| !found.contains(**h)).collect::<Vec<_>>());
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+use crate::shader::{MAX_FILE, Source, sources};

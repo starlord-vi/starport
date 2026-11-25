@@ -600,17 +600,72 @@ pub fn writing(at: usize, len: usize) {
 /// cannot help; not changing the mapping while such a read is under way
 /// does.
 static MAPPING: std::sync::RwLock<()> = std::sync::RwLock::new(());
+// Even while mappings are stable, odd while a writer holds MAPPING.
+// Kernel copies may run without the lock, but their result is publishable
+// only if the same even generation brackets the entire copy.
+static MAPPING_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What the runtime holds while it changes what title memory shows
 /// ([`title_memory_remapping`]).
 pub struct Remapping(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>);
+
+impl Drop for Remapping {
+    fn drop(&mut self) {
+        MAPPING_VERSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// The runtime is about to map, unmap or move physical pages of title
 /// memory: until what it returns is dropped, no read of title memory in
 /// place is under way and none begins ([`title_memory_reading`]). Taken
 /// around the whole change, the unmapping and the mapping again.
 pub fn title_memory_remapping() -> Remapping {
-    Remapping(MAPPING.write().unwrap_or_else(|e| e.into_inner()))
+    let guard = MAPPING.write().unwrap_or_else(|e| e.into_inner());
+    MAPPING_VERSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Remapping(guard)
+}
+
+/// Validate a fallible kernel copy without waiting for remapping. Never
+/// use this for in-place pointer reads: a rejected copy can still meet an
+/// unmapped page. The caller keeps the copy private until true is returned.
+pub(crate) fn stable_mapping_copy(copy: impl FnOnce() -> bool) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let before = MAPPING_VERSION.load(SeqCst);
+    if before & 1 != 0 { return false; }
+    let copied = copy();
+    copied && MAPPING_VERSION.load(SeqCst) == before
+}
+
+#[cfg(test)]
+mod mapping_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn a_kernel_copy_rejects_a_mapping_change_even_if_all_bytes_were_read() {
+        let (start, started) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started.recv().unwrap();
+            { let _mapping = title_memory_remapping(); }
+            done.send(()).unwrap();
+        });
+        assert!(!stable_mapping_copy(|| {
+            start.send(()).unwrap();
+            finished.recv().unwrap();
+            true // ReadProcessMemory can succeed across a remapping.
+        }));
+        writer.join().unwrap();
+        assert!(stable_mapping_copy(|| true), "stable successful copies publish");
+        assert!(!stable_mapping_copy(|| false), "incomplete reads never publish");
+    }
+
+    #[test]
+    fn an_active_mapping_writer_defers_instead_of_waiting_or_reading() {
+        let mapping = title_memory_remapping();
+        assert!(!stable_mapping_copy(|| panic!("must not read an unstable mapping")));
+        drop(mapping);
+        assert!(stable_mapping_copy(|| true));
+    }
 }
 
 /// What a read of title memory in place holds ([`title_memory_reading`]).

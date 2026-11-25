@@ -24,8 +24,7 @@ use windows_sys::Win32::System::Memory::{
     SEC_RESERVE, UnmapViewOfFile2, VirtualAlloc, VirtualAlloc2, VirtualFree, VirtualQueryEx,
 };
 use windows_sys::Win32::System::ProcessStatus::{
-    K32GetPerformanceInfo, K32GetProcessMemoryInfo, PERFORMANCE_INFORMATION,
-    PROCESS_MEMORY_COUNTERS,
+    K32GetPerformanceInfo, PERFORMANCE_INFORMATION,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::core::BOOL;
@@ -33,6 +32,57 @@ use windows_sys::core::BOOL;
 use crate::{HleModule, hle_export};
 
 const MIB: usize = 1 << 20;
+
+static DEFAULT_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static VIRTUAL_RANGES: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+
+pub(crate) fn note_virtual(at: *mut c_void, size: usize) {
+    if !at.is_null() {
+        let size = size.checked_next_multiple_of(4096).unwrap_or(size);
+        VIRTUAL_RANGES.lock().unwrap_or_else(|e| e.into_inner()).insert(at as usize, size);
+    }
+}
+
+pub(crate) fn forget_virtual(at: *mut c_void) {
+    VIRTUAL_RANGES.lock().unwrap_or_else(|e| e.into_inner()).remove(&(at as usize));
+}
+
+/// Count unique guest physical pages and private committed guest reservations.
+/// Mapped aliases are excluded here: their section pages are counted once.
+pub(crate) fn title_usage() -> usize {
+    let mut used = physical().pages.len().saturating_mul(PAGE);
+    used = used.saturating_add(DEFAULT_ALLOCATED.load(Ordering::Relaxed));
+    used = used.saturating_add(victory_gpu::resource::title_allocated_bytes());
+    let mut ranges = VIRTUAL_RANGES.lock().unwrap_or_else(|e| e.into_inner());
+    ranges.retain(|&base, len| {
+        let mut at = base;
+        let end = base.saturating_add(*len);
+        let mut live = false;
+        while at < end {
+            let mut info = MEMORY_BASIC_INFORMATION::default();
+            // SAFETY: querying our address space; no guest memory is dereferenced.
+            if unsafe { VirtualQueryEx(GetCurrentProcess(), at as *const _, &mut info, size_of_val(&info)) } == 0 {
+                break;
+            }
+            let next = (info.BaseAddress as usize).saturating_add(info.RegionSize).min(end);
+            if next <= at { break; }
+            if info.State != windows_sys::Win32::System::Memory::MEM_FREE {
+                live = true;
+            }
+            if info.State == MEM_COMMIT && info.Type == windows_sys::Win32::System::Memory::MEM_PRIVATE {
+                used = used.saturating_add(next - at);
+            }
+            at = next;
+        }
+        live
+    });
+    used
+}
+
+pub(crate) fn title_budget() -> usize {
+    let (fast, standard) = victory_gpu::console::current().title_memory();
+    (fast + standard).saturating_sub(TRANSFERRED.load(Ordering::Relaxed))
+}
 
 /// Whether we run under Wine (its ntdll exports `wine_get_version`).
 pub(crate) fn on_wine() -> bool {
@@ -161,6 +211,9 @@ pub extern "system" fn XMemVirtualAlloc(
             at = format_args!("{at:p}"),
             "XMemVirtualAlloc"
         );
+    }
+    if !at.is_null() && kind & MEM_RESERVE != 0 {
+        note_virtual(at, size);
     }
     at
 }
@@ -298,6 +351,7 @@ pub extern "system" fn XMemAllocDefault(size: usize, attributes: u64) -> *mut c_
     if block.is_null() {
         return block.cast();
     }
+    DEFAULT_ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
     // SAFETY: the block holds the alignment (at least the header) and then
     // `size` bytes.
     unsafe {
@@ -318,11 +372,12 @@ pub extern "system" fn XMemFreeDefault(address: *mut c_void, attributes: u64) {
     // whole reservation, or a header-prefixed block.
     unsafe {
         if attributes & ALLOC_32BIT != 0 {
-            VirtualFree(address, 0, MEM_RELEASE);
+            if VirtualFree(address, 0, MEM_RELEASE) != 0 { forget_virtual(address); }
             return;
         }
         let user = address.cast::<u8>();
         let [size, align] = user.sub(HEADER).cast::<[usize; 2]>().read();
+        DEFAULT_ALLOCATED.fetch_sub(size, Ordering::Relaxed);
         dealloc(
             user.sub(align),
             Layout::from_size_align_unchecked(size, align),
@@ -858,36 +913,21 @@ pub struct WorkingSet {
     pub kernel_pool_limit: u32,
 }
 
-/// The title's budget and our process's commit as what it uses. No tools
-/// memory: a retail console.
-// shortcut: all fields are filled whatever the flags ask for, and use is
-// not split by bandwidth class (GPU-optimal use reads 0); track
-// allocations per class if a title budgets from that field.
+/// The console's title budget and guest allocations, excluding translation
+/// overhead. Aliases of physical pages are counted once. Bandwidth-class
+/// attribution remains unavailable (GPU-optimal used is zero).
 pub extern "system" fn XMemGetWorkingSetStatistics(_which: u32, out: *mut WorkingSet) -> BOOL {
     if out.is_null() {
         return 0;
     }
-    let mut counters = PROCESS_MEMORY_COUNTERS {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: our own process and a sized structure.
-    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
-    let (gpu_optimal, standard) = victory_gpu::console::current().title_memory();
+    let (gpu_optimal, _) = victory_gpu::console::current().title_memory();
     let stats = WorkingSet {
-        title_limit: gpu_optimal + standard - TRANSFERRED.load(Ordering::Relaxed),
-        title_used: counters.PagefileUsage,
+        title_limit: title_budget(),
+        title_used: title_usage(),
         gpu_optimal_limit: gpu_optimal,
         ..Default::default()
     };
-    // What the title is told, logged at the first asking and at every
-    // 1,024th: "used" is all the process has committed, the layer's own
-    // memory and the card's included (27 GB in run 60's gameplay against a
-    // limit of 13.5 GB). A title that budgets its streaming from these two
-    // figures believes it is far over its limit.
-    // shortcut: the figure is not yet the title's own memory alone (its
-    // heaps and the pages it mapped); count those if this line shows the
-    // title asking.
+    // Log the guest accounting, never the host process's private bytes.
     static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let asked = ASKED.fetch_add(1, Ordering::Relaxed);
     if asked.is_multiple_of(1024) {
@@ -974,6 +1014,24 @@ mod tests {
         let p = XMemAlloc(4096, ALLOC_32BIT);
         assert!(!p.is_null() && (p as usize) < 1 << 32);
         XMemFree(p, ALLOC_32BIT);
+    }
+
+    #[test]
+    fn guest_usage_excludes_host_scratch_and_releases_allocations() {
+        let before = title_usage();
+        let scratch = vec![0x5au8; 1 << 20];
+        assert_eq!(title_usage(), before, "host scratch is not a guest allocation");
+        let p = XMemAllocDefault(64 << 10, 0);
+        assert!(!p.is_null());
+        assert!(title_usage() >= before + (64 << 10));
+        XMemFreeDefault(p, 0);
+        assert_eq!(title_usage(), before);
+        assert_eq!(scratch[0], 0x5a);
+        let p = XMemVirtualAlloc(std::ptr::null_mut(), 64 << 10, MEM_RESERVE | MEM_COMMIT, 0, PAGE_READWRITE);
+        assert!(!p.is_null());
+        assert!(title_usage() >= before + (64 << 10));
+        assert_eq!(super::super::kernel::VirtualFree(p, 0, MEM_RELEASE), 1);
+        assert_eq!(title_usage(), before);
     }
 
     #[test]

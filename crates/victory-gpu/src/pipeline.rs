@@ -57,6 +57,8 @@ pub(crate) struct ComputeHead {
 /// A shader container a title passed, shared by every pipeline with the
 /// same bytes.
 pub(crate) struct Shader {
+    #[cfg(windows)]
+    pub(crate) resolves_light: bool,
     pub(crate) stage: &'static str,
     /// The first 8 bytes of its BLAKE3, as logged.
     pub(crate) hash: String,
@@ -108,6 +110,9 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
             KEPT[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             KEPT[1].fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             Arc::new(Shader {
+                #[cfg(windows)]
+                resolves_light: stage == "compute" && bytes.windows(crate::ambient::PROGRAM.len())
+                    .any(|part| part == crate::ambient::PROGRAM),
                 stage,
                 hash: full.to_hex()[..16].to_owned(),
                 container: bytes.to_vec(),

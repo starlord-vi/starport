@@ -31,6 +31,8 @@ pub(crate) struct HostHeap {
     /// released the resource may still be read, and a freed host resource
     /// read there is a GPU page fault (the console reads stale memory).
     kept: Mutex<Vec<Option<ID3D12Resource>>>,
+    /// Unique tracked streaming resources, avoiding a scan of empty slots.
+    resident_views: Mutex<ResidentViews>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -86,6 +88,19 @@ pub(crate) struct HostHeap {
     /// other memory there makes stale, and which to look at again when the
     /// runtime maps, unmaps or writes memory ([`remapped`]).
     placed: Mutex<Spans>,
+}
+
+#[derive(Default)]
+struct ResidentViews(std::collections::HashMap<usize, u32>);
+
+impl ResidentViews {
+    fn replace(&mut self, old: Option<usize>, new: Option<usize>) {
+        if let Some(old) = old && let Some(count) = self.0.get_mut(&old) {
+            *count -= 1;
+            if *count == 0 { self.0.remove(&old); }
+        }
+        if let Some(new) = new { *self.0.entry(new).or_default() += 1; }
+    }
 }
 
 /// Title memory by the placed texture views that describe it: per span of
@@ -608,7 +623,7 @@ impl HostHeap {
         ));
         let strides = (!sampler)
             .then(|| {
-                let bytes = u64::from(victory_shader::emit::SLOT_STRIDES_COUNT) * 4;
+                let bytes = u64::from(victory_shader::emit::SLOT_STRIDES_COUNT) * 4 * u64::from(victory_shader::emit::SLOT_METADATA_PLANES);
                 let (buffer, data) = host.upload_buffer(bytes)?;
                 // SAFETY: the buffer's whole mapping; a live buffer.
                 let gpu = unsafe {
@@ -628,6 +643,7 @@ impl HostHeap {
             sampler,
             made: Mutex::new(vec![0; count as usize]),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
+            resident_views: Mutex::default(),
             next: Mutex::new((0, vec![false; DYNAMIC as usize])),
             free: std::sync::atomic::AtomicU32::new(DYNAMIC),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
@@ -1042,6 +1058,16 @@ impl HostHeap {
             // SAFETY: inside the mapping; shaders read it while we write (a
             // dword, either value is one the slot had).
             unsafe { (*data as *mut u32).add(index as usize).write_volatile(stride.unwrap_or(0)) };
+            let size = view.and_then(|view| match view {
+                View::Placed(false, resource, desc) => crate::resource::texture_view_words(resource, desc[..10].try_into().ok(), true),
+                View::Shader(resource, desc) => crate::resource::object_view_words(*resource as _, desc.as_ref()),
+                _ => None,
+            }).unwrap_or([0; 4]);
+            for (plane, word) in size.into_iter().enumerate() {
+                let at = (plane + 1) * victory_shader::emit::SLOT_STRIDES_COUNT as usize + index as usize;
+                // SAFETY: five planes of aligned dwords in this mapping.
+                unsafe { (*data as *mut u32).add(at).write_volatile(word); }
+            }
         }
         let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
         let was = if stride.is_some() {
@@ -1075,6 +1101,11 @@ impl HostHeap {
             self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
             slots.fill(false);
         }
+        // These slots belong only to lists being reset after completion.
+        // Their old descriptors/resources need not survive until reuse.
+        for index in first..first + end.saturating_sub(at as usize) as u32 {
+            self.make_null(index);
+        }
     }
 
     /// Makes slot `index` (a dynamic one) from `view`; a null view if the
@@ -1099,14 +1130,23 @@ impl HostHeap {
 
     /// Slot `index` now views `resource` (or nothing of the host's).
     fn keep(&self, index: u32, resource: Option<ID3D12Resource>) {
+        use windows::core::Interface;
+        let tracked = resource.as_ref().is_some_and(crate::residency::descriptor_kept);
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(slot) = kept.get_mut(index as usize) {
             // A running submission may still read the old resource through
             // this slot.
+            let old_key = slot.as_ref().map(|r| r.as_raw() as usize);
+            let new_key = resource.as_ref().filter(|_| tracked).map(|r| r.as_raw() as usize);
+            self.resident_views.lock().unwrap_or_else(|e| e.into_inner()).replace(old_key, new_key);
             if let Some(old) = std::mem::replace(slot, resource) {
                 crate::host::retire(old);
             }
         }
+    }
+
+    pub(crate) fn resident_resources(&self) -> Vec<usize> {
+        self.resident_views.lock().unwrap_or_else(|e| e.into_inner()).0.keys().copied().collect()
     }
 
     /// Makes slot `index` (a dynamic one) a raw buffer view of `len` bytes
@@ -1365,6 +1405,45 @@ fn srv_desc(words: &[u32; 10]) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
         std::ptr::from_ref(&words)
             .cast::<D3D12_SHADER_RESOURCE_VIEW_DESC>()
             .read_unaligned()
+    }
+}
+
+/// Intersect the source view with the retained mip chain and rebase it.
+/// A mip-zero-only view becomes a view of the new, lower-resolution top mip.
+fn retained_mips(first: u32, levels: u32, skip: u32, host_mips: u32) -> (u32, u32) {
+    let start = first.saturating_sub(skip).min(host_mips.saturating_sub(1));
+    let end = first.saturating_add(levels).saturating_sub(skip).min(host_mips);
+    (start, end.saturating_sub(start).max(1))
+}
+
+fn rebase_streaming_srv(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, skip: u32, mips: u32) {
+    if skip == 0 { return; }
+    let rebase = |first: &mut u32, levels: &mut u32, clamp: &mut f32| {
+        (*first, *levels) = retained_mips(*first, *levels, skip, mips);
+        *clamp = (*clamp - skip as f32).max(0.0);
+    };
+    // SAFETY: ViewDimension selects the active union member. Clamping is
+    // restricted to 2D, non-MSAA CPU streaming resources, including arrays.
+    unsafe {
+        match desc.ViewDimension {
+            D3D12_SRV_DIMENSION_TEXTURE2D => {
+                let v = &mut desc.Anonymous.Texture2D;
+                rebase(&mut v.MostDetailedMip, &mut v.MipLevels, &mut v.ResourceMinLODClamp);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+                let v = &mut desc.Anonymous.Texture2DArray;
+                rebase(&mut v.MostDetailedMip, &mut v.MipLevels, &mut v.ResourceMinLODClamp);
+            }
+            D3D12_SRV_DIMENSION_TEXTURECUBE => {
+                let v = &mut desc.Anonymous.TextureCube;
+                rebase(&mut v.MostDetailedMip, &mut v.MipLevels, &mut v.ResourceMinLODClamp);
+            }
+            D3D12_SRV_DIMENSION_TEXTURECUBEARRAY => {
+                let v = &mut desc.Anonymous.TextureCubeArray;
+                rebase(&mut v.MostDetailedMip, &mut v.MipLevels, &mut v.ResourceMinLODClamp);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1885,6 +1964,11 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                     }
                 }
                 let mut desc = desc.as_ref().map(srv_desc);
+                if let Some(desc) = &mut desc {
+                    // SAFETY: a live texture. Array slices and cube faces are unchanged.
+                    let mips = u32::from(unsafe { texture.GetDesc() }.MipLevels);
+                    rebase_streaming_srv(desc, crate::resource::host_first_mip(resource), mips);
+                }
                 if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
                     return None;
                 }
@@ -2212,6 +2296,40 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_view_census_tracks_shared_and_released_slots() {
+        let mut views = ResidentViews::default();
+        views.replace(None, Some(10));
+        views.replace(None, Some(10));
+        views.replace(Some(10), Some(20));
+        assert_eq!(views.0.get(&10), Some(&1));
+        assert_eq!(views.0.get(&20), Some(&1));
+        views.replace(Some(10), None);
+        views.replace(Some(20), None);
+        views.replace(Some(30), None); // an untracked buffer
+        assert!(views.0.is_empty());
+    }
+
+    #[test]
+    fn streaming_views_intersect_the_retained_mip_chain() {
+        assert_eq!(retained_mips(0, u32::MAX, 1, 11), (0, 11));
+        assert_eq!(retained_mips(1, 4, 1, 11), (0, 4));
+        assert_eq!(retained_mips(4, 3, 1, 11), (3, 3));
+        assert_eq!(retained_mips(0, 1, 1, 11), (0, 1));
+        let mut desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURECUBEARRAY,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { TextureCubeArray: D3D12_TEXCUBE_ARRAY_SRV {
+                MostDetailedMip: 2, MipLevels: 3, First2DArrayFace: 6, NumCubes: 2, ResourceMinLODClamp: 2.5,
+            }}, ..Default::default()
+        };
+        rebase_streaming_srv(&mut desc, 1, 11);
+        // SAFETY: the cube-array member selected above.
+        let view = unsafe { desc.Anonymous.TextureCubeArray };
+        assert_eq!((view.MostDetailedMip, view.MipLevels), (1, 3));
+        assert_eq!((view.First2DArrayFace, view.NumCubes), (6, 2));
+        assert_eq!(view.ResourceMinLODClamp, 1.5);
+    }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's
     /// wind field), and is 2D when the title names none.

@@ -639,6 +639,37 @@ impl State {
         }
     }
 
+    /// Build-specific indirect-light fallback from the reviewed Belobug
+    /// resolve hook. Require both the named program and its translated UAV
+    /// binding; a PSO name by itself cannot identify a safe output.
+    fn ambient(&self, list: &HostList, p: &crate::pipeline::host::HostPipeline) -> bool {
+        let Some(stage) = p.stages.first().filter(|s| s.shader.resolves_light) else { return false; };
+        let (slot, offset) = crate::ambient::LIGHT;
+        if !stage.translated().used.iter().any(|u| u.kind == ResourceType::Uav
+            && u.root == RootType::Table && u.slot == slot && u.table_offset_dwords == offset) {
+            return false;
+        }
+        let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(slot)) else { return false; };
+        let Some(selected) = crate::descriptor::view(table + u64::from(offset) * 4) else { return false; };
+        let placed = crate::descriptor::host::placed_texture(&selected);
+        let View::Unordered(resource, _, words) = placed.as_ref().unwrap_or(&selected) else {
+            once!("ambient fallback skipped: resolve output is not an explicit UAV");
+            return false;
+        };
+        // SAFETY: ten words are a complete, unaligned guest UAV description.
+        let view = words.map(|words| unsafe {
+            words.as_ptr().cast::<D3D12_UNORDERED_ACCESS_VIEW_DESC>().read_unaligned()
+        }).unwrap_or(D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_UINT,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D, ..Default::default()
+        });
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| tracing::info!(shader=%stage.shader.hash, pipeline=%p.name,
+            resource=format_args!("{resource:#x}"), root=slot, offset_dwords=offset,
+            "ambient fallback resolve binding matched"));
+        crate::ambient::raise(list, *resource as This, &view)
+    }
+
     /// The user-data value of a root argument, as translated shaders read
     /// it: a table's byte offset in its heap, a constant's value.
     fn user_value(&self, compute: bool, slot: u8, root: RootType, dword: u32) -> u32 {
@@ -856,7 +887,8 @@ impl State {
                 .heaps
                 .iter()
                 .filter(|&&h| h != 0)
-                .filter_map(|&h| crate::descriptor::heap(h as This).host())
+                .filter_map(|&h| crate::descriptor::heap(h as This).retained_host())
+                .inspect(|heap| list.keep_heap(heap))
                 .map(|h| Some(h.heap.clone()))
                 .collect();
             heaps.iter().flatten().for_each(|h| list.keep(h));
@@ -958,6 +990,22 @@ impl State {
                                     l.SetGraphicsRootShaderResourceView(param, m.directory);
                                 }
                             }
+                        }
+                        continue;
+                    }
+                    if srv && slot == victory_shader::emit::SLOT_TEXTURE_SIZES {
+                        // A size query needs metadata, not residency or uploads
+                        // of every texture whose descriptor is in the heap.
+                        let metadata = self.heaps.iter().filter(|&&heap| heap != 0)
+                            .map(|&heap| crate::descriptor::heap(heap as This))
+                            .find(|heap| !heap.samplers()).and_then(|heap| heap.host());
+                        let Some(metadata) = metadata else { return false; };
+                        let Some(gpu) = metadata.strides_gpu() else { return false; };
+                        if let Some(buffer) = metadata.strides_buffer() { list.keep(buffer); }
+                        // SAFETY: a live sidecar buffer, retained by this list.
+                        unsafe {
+                            if compute { l.SetComputeRootShaderResourceView(param, gpu); }
+                            else { l.SetGraphicsRootShaderResourceView(param, gpu); }
                         }
                         continue;
                     }
@@ -1714,6 +1762,10 @@ impl State {
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+        let ambient = x != 0 && y != 0 && z != 0 && self.ambient(list, p);
+        if list.publish_material_depth() | ambient {
+            self.replay(list);
+        }
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -2464,6 +2516,9 @@ impl State {
         crate::indirect::done(list, &bounded);
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            if list.publish_material_depth() {
+                self.replay(list);
+            }
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
