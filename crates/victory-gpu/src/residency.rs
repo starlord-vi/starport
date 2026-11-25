@@ -17,6 +17,7 @@ struct Entry {
     resident: bool,
     range: (usize, usize),
     invalidated: bool,
+    hard_invalidated: bool,
     target_bytes: u64,
     promotable: bool,
     promotion_retry_ms: u64,
@@ -30,6 +31,8 @@ static PATCHES: AtomicU64 = AtomicU64::new(0);
 static PINNED: AtomicU64 = AtomicU64::new(0);
 static INVALIDATED: AtomicU64 = AtomicU64::new(0);
 static CHANGES: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+static REMAPS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+static POLICY_SKIPS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static BOUNDS: [AtomicU64; 2] = [AtomicU64::new(u64::MAX), AtomicU64::new(0)];
 
 pub(crate) fn legacy() -> bool {
@@ -50,7 +53,68 @@ pub(crate) fn target_pct() -> u64 {
             .unwrap_or(85)
     })
 }
+fn v2() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STARPORT_EVICTOR_V2").is_none_or(|v| v != "0"))
+}
+fn minimum_bytes() -> u64 {
+    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("STARPORT_EVICT_MIN_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v <= 4 << 30)
+            .unwrap_or(2 << 20)
+    })
+}
+fn minimum_ms() -> u64 {
+    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("STARPORT_EVICT_MIN_RESIDENCY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v <= 60000)
+            .unwrap_or(2000)
+    })
+}
+#[derive(Debug, PartialEq, Eq)]
+enum Excluded {
+    Uncompressed,
+    Small,
+    Recent,
+    Thrashing,
+}
+fn policy(
+    format: u32,
+    bytes: u64,
+    age: u64,
+    reuploads: u32,
+    minimum: u64,
+    ms: u64,
+) -> Option<Excluded> {
+    if !matches!(format,70..=84|94..=99) {
+        Some(Excluded::Uncompressed)
+    } else if bytes < minimum {
+        Some(Excluded::Small)
+    } else if age < ms {
+        Some(Excluded::Recent)
+    } else if reuploads >= 2 {
+        Some(Excluded::Thrashing)
+    } else {
+        None
+    }
+}
+pub(crate) fn policy_skips() -> [u64; 4] {
+    POLICY_SKIPS.each_ref().map(|v| v.load(Relaxed))
+}
 pub(crate) fn note_overwrite(at: usize, len: usize) {
+    note_range(at, len, &CHANGES);
+}
+pub(crate) fn note_remap(at: usize, len: usize) {
+    note_range(at, len, &CHANGES);
+    note_range(at, len, &REMAPS);
+}
+fn note_range(at: usize, len: usize, journal: &Mutex<Vec<(usize, usize)>>) {
     if !enabled() || legacy() || len == 0 {
         return;
     }
@@ -58,7 +122,7 @@ pub(crate) fn note_overwrite(at: usize, len: usize) {
     if (end as u64) <= BOUNDS[0].load(Relaxed) || at as u64 >= BOUNDS[1].load(Relaxed) {
         return;
     }
-    let mut changes = CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut changes = journal.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(last) = changes.last_mut()
         && at <= last.1
         && end >= last.0
@@ -80,7 +144,14 @@ pub(crate) fn uploaded(key: usize) {
     let mut entries = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = entries.get_mut(&key) {
         entry.invalidated = false;
+        entry.hard_invalidated = false;
         if let Some(texture) = entry.texture.upgrade() {
+            if texture.upload_count.fetch_add(1, Relaxed) > 0 {
+                texture.reuploads.fetch_add(1, Relaxed);
+            }
+            texture
+                .last_uploaded_ms
+                .store(crate::host::now_ms(), Relaxed);
             texture
                 .last_used_frame
                 .store(crate::frame::current(), Relaxed);
@@ -117,6 +188,7 @@ pub(crate) fn track(texture: &std::sync::Arc<HostTexture>, guest: usize, bytes: 
             resident: true,
             range,
             invalidated: false,
+            hard_invalidated: false,
             target_bytes,
             promotable,
             promotion_retry_ms: 0,
@@ -324,7 +396,7 @@ fn eviction_key(invalidated: bool, last: u64, key: usize) -> (bool, u64, usize) 
 pub(crate) fn sweep() {
     promote_tails();
     static LOG: std::sync::Once = std::sync::Once::new();
-    LOG.call_once(||tracing::info!(target:"starport::residency",enabled=enabled(),legacy=legacy(),target_pct=target_pct(),cold_frames=90,
+    LOG.call_once(||tracing::info!(target:"starport::residency",enabled=enabled(),legacy=legacy(),v2=v2(),target_pct=target_pct(),cold_frames=90,min_bytes=minimum_bytes(),min_residency_ms=minimum_ms(),pin_after_reuploads=2,
         "streaming residency policy; recorded owners and unfinished submissions remain pinned"));
     if !enabled() {
         return;
@@ -351,13 +423,20 @@ pub(crate) fn sweep() {
     let changes = merged_changes(std::mem::take(
         &mut *CHANGES.lock().unwrap_or_else(|e| e.into_inner()),
     ));
+    let remaps = merged_changes(std::mem::take(
+        &mut *REMAPS.lock().unwrap_or_else(|e| e.into_inner()),
+    ));
+    let now = crate::host::now_ms();
     let frame = crate::frame::current();
     let finished = crate::host::finished_submission();
     let (mut candidates, mut held) = (Vec::new(), Vec::new());
     {
         let mut entries = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
         for (&key, entry) in entries.iter_mut() {
-            if !entry.invalidated && changed(entry.range, &changes) {
+            if changed(entry.range, &remaps) {
+                entry.hard_invalidated = true;
+            }
+            if !entry.invalidated && (entry.hard_invalidated || changed(entry.range, &changes)) {
                 entry.invalidated = true;
                 INVALIDATED.fetch_add(1, Relaxed);
             }
@@ -365,11 +444,37 @@ pub(crate) fn sweep() {
                 continue;
             };
             let last = texture.last_used_frame.load(Relaxed);
-            let eligible = if entry.invalidated {
-                entry.last_submission <= finished
+            let age = now.saturating_sub(
+                texture
+                    .created_ms
+                    .max(texture.last_uploaded_ms.load(Relaxed)),
+            );
+            let reuploads = texture.reuploads.load(Relaxed);
+            let excluded = if v2() && !entry.hard_invalidated {
+                policy(
+                    texture.format,
+                    entry.bytes,
+                    age,
+                    reuploads,
+                    minimum_bytes(),
+                    minimum_ms(),
+                )
             } else {
-                pressure && !texture.tail && cold(last, frame, entry.last_submission, finished)
+                None
             };
+            let eligible = if entry.invalidated {
+                entry.last_submission <= finished && excluded.is_none()
+            } else {
+                pressure
+                    && !texture.tail
+                    && excluded.is_none()
+                    && cold(last, frame, entry.last_submission, finished)
+            };
+            if (entry.invalidated || pressure)
+                && let Some(reason) = excluded
+            {
+                POLICY_SKIPS[reason as usize].fetch_add(1, Relaxed);
+            }
             if eligible && std::sync::Arc::strong_count(&texture) == 2 {
                 candidates.push((
                     !entry.invalidated,
@@ -378,6 +483,9 @@ pub(crate) fn sweep() {
                     entry.guest,
                     texture.epoch,
                     entry.bytes,
+                    age,
+                    reuploads,
+                    entry.hard_invalidated,
                     texture,
                 ));
             } else {
@@ -391,7 +499,7 @@ pub(crate) fn sweep() {
     drop(held);
     candidates.sort_unstable_by_key(|c| eviction_key(!c.0, c.1, c.2));
     let mut processed = 0;
-    for (not_invalid, last, key, guest, epoch, bytes, texture) in candidates {
+    for (not_invalid, last, key, guest, epoch, bytes, age, reuploads, hard, texture) in candidates {
         if processed >= 64 {
             break;
         }
@@ -401,19 +509,38 @@ pub(crate) fn sweep() {
         if texture.last_used_frame.load(Relaxed) != last {
             continue;
         }
-        let Some(patched) = crate::descriptor::host::patch_cold_resource(key, frame) else {
-            PINNED.fetch_add(1, Relaxed);
-            continue;
+        let transaction = if v2() {
+            crate::descriptor::host::patch_for_promotion(key, frame)
+        } else {
+            None
+        };
+        let patched = if v2() {
+            let Some(patch) = transaction.as_ref() else {
+                PINNED.fetch_add(1, Relaxed);
+                continue;
+            };
+            patch.count()
+        } else {
+            let Some(patched) = crate::descriptor::host::patch_cold_resource(key, frame) else {
+                PINNED.fetch_add(1, Relaxed);
+                continue;
+            };
+            patched
         };
         PATCHES.fetch_add(patched, Relaxed);
         drop(texture);
         if crate::resource::reclaim_streaming(guest, key, epoch) {
+            if let Some(patch) = transaction {
+                patch.commit_eviction();
+            }
             EVICTED.fetch_add(1, Relaxed);
             EVICTED_BYTES.fetch_add(bytes, Relaxed);
             reclaim = reclaim.saturating_sub(bytes);
-            tracing::debug!(target:"starport::residency",guest,bytes,patched,overwrite=!not_invalid,
-                "patched descriptors and released CPU-owned texture shadow");
+            tracing::info!(target:"starport::eviction",guest,bytes,patched,age_ms=age,reuploads,
+                reason=if hard {"mapping-generation-change"} else if !not_invalid {"guest-overwrite"} else {"local-budget-pressure"},
+                "released backing after fence completion and descriptor patching; no CPU pixel cache retained");
         } else {
+            drop(transaction); // failed backing release restores real descriptors
             PINNED.fetch_add(1, Relaxed);
         }
         processed += 1;
@@ -524,6 +651,27 @@ pub(crate) fn counters() -> [u64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn churn_policy_excludes_ui_small_recent_and_repeated_uploads() {
+        assert_eq!(
+            policy(28, 4 << 20, 9000, 0, 2 << 20, 2000),
+            Some(Excluded::Uncompressed)
+        );
+        assert_eq!(
+            policy(98, 1 << 20, 9000, 0, 2 << 20, 2000),
+            Some(Excluded::Small)
+        );
+        assert_eq!(
+            policy(98, 4 << 20, 1999, 0, 2 << 20, 2000),
+            Some(Excluded::Recent)
+        );
+        assert_eq!(
+            policy(98, 4 << 20, 9000, 2, 2 << 20, 2000),
+            Some(Excluded::Thrashing)
+        );
+        assert_eq!(policy(98, 4 << 20, 2000, 1, 2 << 20, 2000), None);
+        assert_eq!(policy(71, 4096, 0, 0, 0, 0), None);
+    }
     #[test]
     fn lru_and_overwrite_priority_are_deterministic() {
         let mut entries = [(false, 12, 4), (false, 2, 7), (true, 20, 1), (false, 2, 3)];

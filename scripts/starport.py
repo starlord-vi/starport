@@ -172,7 +172,8 @@ def main():
                  'STARPORT_WATCHDOG_SECONDS', 'STARPORT_WATCHDOG_STACKS', 'STARPORT_MEM_BUDGET_MB',
                  'STARPORT_WAVE64_TRACE', 'STARPORT_AMBIENT_TRACE', 'STARPORT_SUBPHASES',
                  'STARPORT_MEMORY_EVERY_N', 'STARPORT_BENCH',
-                 'STARPORT_PROGRESSIVE_TEXTURES', 'STARPORT_TAIL_BUDGET_MB'):
+                 'STARPORT_PROGRESSIVE_TEXTURES', 'STARPORT_TAIL_BUDGET_MB', 'STARPORT_EVICTOR_V2',
+                 'STARPORT_EVICT_MIN_BYTES', 'STARPORT_EVICT_MIN_RESIDENCY_MS'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':

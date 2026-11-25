@@ -235,6 +235,8 @@ pub(crate) fn present(flights: usize, pending_frames: usize) {
         overwrite_invalidations=crate::residency::details()[2],
         tail_bytes=crate::progressive::counters()[0], tail_allocations=crate::progressive::counters()[1],
         promoted_textures=crate::progressive::counters()[2], unavailable_tail_attempts=crate::progressive::counters()[3],
+        eviction_skip_uncompressed=crate::residency::policy_skips()[0],eviction_skip_small=crate::residency::policy_skips()[1],
+        eviction_skip_recent=crate::residency::policy_skips()[2],eviction_skip_thrashing=crate::residency::policy_skips()[3],
         "sampled presented-frame attribution; phases are CPU wall times, recording may precede submission");
     for back in [false, true] {
         let mut resources: Vec<_> = frame

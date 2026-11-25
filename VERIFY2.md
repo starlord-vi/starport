@@ -15,6 +15,7 @@ $env:STARPORT_SERIES_S = '0'
 $env:STARPORT_MAX_RES = '1920x1080'
 $env:STARPORT_SKIP_MIPS = '2'
 $env:STARPORT_PROGRESSIVE_TEXTURES = '0' # pass-1 admission for the baseline
+$env:STARPORT_EVICTOR_V2 = '0' # pass-1 descriptor-patched eligibility
 $env:STARPORT_FALLBACK_COLOR = 'black'
 $env:STARPORT_LEGACY_RESIDENCY = '0'
 $env:STARPORT_DIRTY_TRACKING = '1'
@@ -135,5 +136,45 @@ reason. The offline integration test covers partially mapped source pages,
 native lease rejection with descriptor rollback, successful GPU promotion,
 matching size metadata and exact raw BC readback bytes. Lower backlog, real
 blurry surfaces and frame-time changes still require the user's run.
+
+## Task 2: stop pressure-driven churn
+
+```powershell
+$env:STARPORT_EVICTOR_V2 = '1'
+$env:STARPORT_EVICT_MIN_BYTES = '2097152'
+$env:STARPORT_EVICT_MIN_RESIDENCY_MS = '2000'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+V2 defaults to 1; 0 restores pass-1 eligibility while retaining the selected
+progressive setting. Local pressure was already driven by **total DXGI local
+CurrentUsage/Budget**, including render targets, buffers and driver allocations;
+it is not based on the live-texture subtotal. The target remains 85% with
+five percentage points of hysteresis. Category counters explain pressure but
+are not subtracted to invent a different DXGI budget.
+
+V2 excludes non-BC textures, allocations below 2 MiB, those uploaded/created
+within two seconds, and a title texture after two re-uploads. MIN_BYTES accepts
+bytes (0..4 GiB), MIN_RESIDENCY_MS accepts 0..60000; zero disables that particular
+threshold. V2=0 disables all added filters. Re-upload count survives backing
+replacement and counts dirty uploads after an allocation's initial upload;
+the initial tail-to-full promotion does not count as churn.
+
+Ordinary kernel writes still queue views for hashed refresh and do not force
+excluded UI/movie resources through backing destruction. Explicit mapping
+changes are separate hard invalidations; they bypass churn exclusions because
+the old source mapping is no longer valid. All disposal retains the fence,
+generation, recorded-list, dynamic-descriptor and CPU-lease checks. Failed V2
+disposal restores unchanged descriptors transactionally rather than leaving a
+fallback while recorded references pin the allocation.
+
+Check `starport::eviction` for each completed release: reason, bytes, age,
+re-upload count and patches. Reasons distinguish local pressure, guest writes
+and mapping-generation changes. Check `eviction_skip_uncompressed/small/recent/
+thrashing` and the existing actual eviction/pinned/queue counters. Skip counters
+count policy decisions across sweeps, not unique textures. Every replacement
+reads current guest pixels and validates content hashes; no evicted CPU pixel
+cache is retained. A lower eviction count can be correct if it removes churn;
+judge RAM/VRAM, due backlog and the same-scene bench together.
 
 The remaining task comparisons will be added with their implementations.

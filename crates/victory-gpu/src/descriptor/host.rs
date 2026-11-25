@@ -89,6 +89,14 @@ pub(crate) fn patched_count() -> u64 {
 pub(crate) struct PromotionPatch {
     slots: Vec<(std::sync::Arc<HostHeap>, u32, u64)>,
 }
+impl PromotionPatch {
+    pub(crate) fn count(&self) -> u64 {
+        self.slots.len() as u64
+    }
+    pub(crate) fn commit_eviction(mut self) {
+        self.slots.clear();
+    }
+}
 impl Drop for PromotionPatch {
     fn drop(&mut self) {
         for (heap, index, old) in &self.slots {

@@ -1140,6 +1140,11 @@ pub(crate) struct HostTexture {
     pub(crate) demoted: bool,
     pub(crate) tail: bool,
     pub(crate) initial_tail: std::sync::Mutex<Option<Vec<u8>>>,
+    pub(crate) format: u32,
+    pub(crate) created_ms: u64,
+    pub(crate) last_uploaded_ms: std::sync::atomic::AtomicU64,
+    pub(crate) upload_count: std::sync::atomic::AtomicU32,
+    pub(crate) reuploads: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub(crate) upload_hashes: std::sync::Arc<std::sync::Mutex<Vec<Option<blake3::Hash>>>>,
     pub(crate) upload_telemetry: std::sync::OnceLock<std::sync::Arc<crate::telemetry::Resource>>,
     /// Source mip represented by host mip zero (CPU-streamed views only).
@@ -1187,6 +1192,7 @@ struct Hosted {
     placed: std::sync::atomic::AtomicBool,
     promoted: std::sync::atomic::AtomicBool,
     effective_mip: std::sync::atomic::AtomicU32,
+    reuploads: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Counts for the memory line: host copies of textures the title fills
@@ -1395,6 +1401,11 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         let state = crate::host::legal_state(&texture, crate::host::texture_state(r.host.state));
         let mut host = HostTexture::new(texture, state);
         host.demoted = r.host.gone.load(Relaxed);
+        host.reuploads = r.host.reuploads.clone();
+        if host.demoted {
+            host.reuploads.fetch_add(1, Relaxed);
+        }
+        r.host.gone.store(false, Relaxed);
         host.first_mip = first_mip;
         host.tail = tail;
         *host
@@ -1407,7 +1418,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             KINDS[0].fetch_add(1, Relaxed);
             KINDS[1].fetch_add(host.bytes, Relaxed);
         }
-        if r.host.gone.load(Relaxed) {
+        if host.demoted {
             KINDS[4].fetch_add(1, Relaxed);
             KINDS[5].fetch_add(host.bytes, Relaxed);
         }
@@ -1714,6 +1725,9 @@ pub(crate) fn promote_tail(guest: usize, key: usize, epoch: u64) -> bool {
     let mut next = HostTexture::new(native, crate::host::texture_state(0));
     next.first_mip = target;
     next.filled = true;
+    next.reuploads = r.host.reuploads.clone();
+    next.upload_count.store(1, Relaxed);
+    next.last_uploaded_ms.store(crate::host::now_ms(), Relaxed);
     *next.upload_hashes.lock().unwrap_or_else(|e| e.into_inner()) = hashes;
     let d = unsafe { next.texture.GetDesc() };
     let counter = Arc::new(crate::telemetry::Resource::new(crate::telemetry::Shape {
@@ -1845,6 +1859,11 @@ impl HostTexture {
             demoted: false,
             tail: false,
             initial_tail: std::sync::Mutex::new(None),
+            format: unsafe { texture.GetDesc() }.Format.0 as u32,
+            created_ms: crate::host::now_ms(),
+            last_uploaded_ms: std::sync::atomic::AtomicU64::new(0),
+            upload_count: std::sync::atomic::AtomicU32::new(0),
+            reuploads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             epoch: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
                 NEXT.fetch_add(1, Relaxed)
@@ -2278,6 +2297,7 @@ fn hand_out_resource(
             placed: std::sync::atomic::AtomicBool::new(false),
             promoted: std::sync::atomic::AtomicBool::new(false),
             effective_mip: std::sync::atomic::AtomicU32::new(u32::MAX),
+            reuploads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         },
     });
     // The host copy waits for the texture's first use ([`Hosted`]).
@@ -3320,11 +3340,31 @@ mod tests {
             assert!(reclaim_streaming(image as usize, key, epoch));
             let replacement = host_resource(image).unwrap();
             assert_ne!(replacement.epoch, epoch);
+            assert_eq!(
+                replacement
+                    .reuploads
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
             assert!(
                 !reclaim_streaming(image as usize, key, epoch),
                 "old generation cannot release the new allocation"
             );
+            let replacement_key = replacement.texture.as_raw() as usize;
+            let replacement_epoch = replacement.epoch;
             drop(replacement);
+            assert!(reclaim_streaming(
+                image as usize,
+                replacement_key,
+                replacement_epoch
+            ));
+            let third = host_resource(image).unwrap();
+            assert_eq!(
+                third.reuploads.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "re-upload hysteresis survives allocation replacement"
+            );
+            drop(third);
             slot::<Release>(title_heap, 0x10)(title_heap);
             slot::<Release>(image, 0x10)(image);
         });
