@@ -1,5 +1,9 @@
 # Series S, streaming residency and shader audit (2026-11-25)
 
+Historical first-patch audit. For current defaults, multi-mip selection,
+descriptor-patched reclamation and exact user-run commands, use
+[VERIFY.md](../VERIFY.md); it supersedes the earlier defaults below.
+
 This change was checked through CLI compilation, unit/integration tests and
 offline shader validation. The game and `Play-Starport.cmd` were not launched.
 Resolution, world FPS and visual improvements require the user's next run.

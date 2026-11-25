@@ -4,13 +4,18 @@ Do not use an automated game launch. The user runs the comparisons below.
 Keep the same save, camera, cache and workload for each comparison. Compare
 world-only windows; menu FPS does not establish gameplay performance.
 
+Offline results, test counts, expected negative PSO diagnostic and build hash
+are recorded in [resource-pipeline validation](docs/resource-pipeline-validation.md).
+
 ## Exact ordered comparisons (user runs these)
 
 These commands are for you to run from `A:\starport\port`, after the offline
 build. Close each run before starting the next command. Use Series X for this
 sequence; the Series S black-screen path has not been fixed. Keep the same
-save, camera and warmed shader cache, and collect at least 60 seconds in the
-same world scene. The runner records flags in each run's settings/evidence.
+save, camera and warmed shader cache, and collect at least 60 seconds and
+120 presented world frames in the same scene. Cold eviction needs 90 frames;
+at ~1 FPS this comparison needs over two minutes. The runner records flags
+in each run's settings/evidence.
 This baseline deliberately disables the new optimizations; conservative dirty
 tracking off can be slower than the previously measured 1.3–1.4 FPS build.
 
@@ -216,6 +221,9 @@ The small immutable fallback cache is capped at 64 shape/format variants;
 unsupported cases log a warning and retain a typed null. Initializing it uses
 a private queue/fence so descriptor publication cannot recursively acquire the
 normal submission lock. GPU readback tests verify grey/magenta/white texels.
+If initialization has submitted work but cannot confirm completion, it retains
+that submission's objects/event and disables further color initialization for
+the process. This bounded exceptional retention avoids freeing in-flight data.
 
 Actual draws *sampling* an indexed fallback cannot be counted by knowing that
 a heap contains one: bindless indices are selected in shaders. No misleading

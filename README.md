@@ -105,11 +105,21 @@ gameplay action still require in-game verification.
 
 See [local validation](docs/starport-validation.md) and
 [source provenance](docs/starport-provenance.md) for measured limits and credits.
-The latest affected-crate checks reported 470 passing tests, 3 ignored
-benchmarks and 4 compiler-dependent internal skips within that passing count.
+The latest affected-crate checks reported 492 passing tests, 3 ignored tests
+(two benchmarks and the inherited strict-join diagnostic), and 4 compiler-dependent
+internal skips within that passing count.
 Workspace check, Clippy with warnings denied and the asset policy passed.
 Eight reported shader containers pass offline DXIL validation; four compute
 pipelines still fail the separate NVIDIA PSO creation diagnostic.
+
+The current CLI-only renderer work is mapped in [ORIENTATION.md](ORIENTATION.md).
+[VERIFY.md](VERIFY.md) contains the ordered Series X A/B commands, current
+defaults, kill switches and telemetry signals. Resolution ceilings, multi-mip
+selection, descriptor-patched texture reclamation, fine dirty uploads and
+bounded presentation flights have offline coverage. Their world performance
+and visual effects have not been measured. Demand readback remains deferred;
+guest CPU output submissions still complete synchronously. Ambient behavior
+and the four guarded Wave64 programs remain unchanged.
 
 - [ztrx #36](https://github.com/Zettrox/ztrx/pull/36): valid integer-target
   blend state and a conservative LDS flag-region lowering for wave32 hosts.

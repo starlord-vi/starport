@@ -24,3 +24,25 @@ This map was checked against the code before changing behavior. No game launch.
 Game files, shader fixtures, logs, build outputs and runtime captures stay outside
 the source tree. Existing remap locks, NVIDIA Wave32 handling, pixel shader
 regressions and RT completeness guards are required invariants.
+
+## Implementation added after this baseline
+
+| Area | Current code / boundary |
+| --- | --- |
+| Resource attribution | `telemetry.rs`: bounded per-frame upload/readback attribution and allocation-offset coverage; sampled every ~2 seconds |
+| Resolution ceiling | `display.rs`: monitor/default/explicit ceiling and pure aspect fit; `dxgi.rs`, HLE `lifecycle.rs`, host window/swapchain paths consume it |
+| Oversized presentation | `present_blit.rs`: fullscreen linear scaling with owned descriptors; no mismatched CopyResource |
+| Multi-mip omission | `resource.rs`: streaming policy / shared retained mip range; `texture.rs`: original source stride, selected host footprints; `descriptor/host.rs`: rebased SRV |
+| Missing SRV diagnostics | `fallback.rs`: immutable private-queue initialized typed color resources, bounded cache; UAVs/buffers remain null |
+| Descriptor-patched residency | `residency.rs`: invalidation journal, budget sweep, cold candidate order; `descriptor/host.rs`: reverse slot census / patch / requeue; `resource.rs`: epoch-checked reclaim and owned leases |
+| Dirty uploads | `watch.rs`: 4 KiB write-watch, 64 KiB section guards; `shadow.rs`: dirty buffer ranges; `texture.rs`: persistent per-mip hashes, compact selected upload footprints |
+| Optional GPU upload heaps | `host.rs`: OPTIONS16 query, guarded GPU_UPLOAD selection and ordinary UPLOAD fallback |
+| Demand copy-back | Not implemented; `docs/demand-readback.md` explains missing native CPU/alias read barriers. Existing merge/readback remains active |
+| Presentation slots | `frames.rs` and `host.rs`: bounded fence-protected slots; guest shader-written buffers / explicit readbacks / callbacks stay synchronous |
+| Stalls and memory identity | `watchdog.rs`: bounded event ring / no-present snapshots; loader stack callback is opt-in. `console.rs`: single proportional reported-budget override, independent identity |
+| Guarded compute bindings | `binding_trace.rs`, `draw.rs`, `pipeline.rs`: bounded potential producer/consumer overlap from static metadata; shaders remain refused |
+| Ambient reach | `ambient_trace.rs`: matched bindings / override hits per present, first output binding and unknown downstream multiply. `ambient.rs` behavior stays unchanged |
+| User verification | `VERIFY.md`: exact staged commands, flags/defaults/kill switches, limitations and observable success signals |
+
+Paths without a prefix in this table are under `crates/victory-gpu/src`.
+The first table is the recorded pre-change map, not a claim about current defaults.

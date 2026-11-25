@@ -1,5 +1,9 @@
 # Local validation: 25 November 2026
 
+This records earlier visual runs and the earlier workspace suite. The later
+CLI-only resource/pipeline work has separate evidence in
+[renderer verification](../VERIFY.md); no new gameplay measurement is implied.
+
 Windows 11, Intel i5-13400F, NVIDIA RTX 5060 (8 GB), 32 GB RAM. Original
 executable SHA-256:
 `e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993`.
