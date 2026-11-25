@@ -13,6 +13,12 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
 
+static PATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn patched_count() -> u64 {
+    PATCHED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) struct HostHeap {
     pub(crate) heap: ID3D12DescriptorHeap,
     cpu: usize,
@@ -1242,6 +1248,7 @@ impl HostHeap {
 
     /// Slot `index` now views `resource` (or nothing of the host's).
     fn keep(&self, index: u32, resource: Option<ID3D12Resource>) {
+        PATCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         use windows::core::Interface;
         let tracked = resource
             .as_ref()

@@ -382,6 +382,23 @@ fn pipeline<'a>(this: This) -> &'a Pipeline {
     unsafe { &*this.cast::<Pipeline>() }
 }
 
+#[cfg(windows)]
+pub(crate) fn guarded_compute_hash(this: This) -> Option<String> {
+    if this.is_null() {
+        return None;
+    }
+    pipeline(this)
+        .shaders
+        .iter()
+        .find(|s| {
+            matches!(
+                s.hash.as_str(),
+                "2da4beb386509b77" | "369cbe906ea72764" | "02384a60fda6f2d0" | "6b82bc7d22016cb5"
+            )
+        })
+        .map(|s| s.hash.clone())
+}
+
 /// List method: logs each pipeline's shaders the first time a list binds
 /// it, so a run lists the shaders its frames need first.
 pub(crate) fn bound(this: This) {

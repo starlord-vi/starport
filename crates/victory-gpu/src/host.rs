@@ -321,6 +321,16 @@ static COPY_BACK: [std::sync::atomic::AtomicU64; 2] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
+fn submission_time(which: usize, us: u64) {
+    SUBMISSION_US[which].fetch_add(us, Ordering::Relaxed);
+    crate::telemetry::phase(which, us);
+}
+
+fn back_time(us: u64) {
+    COPY_BACK[0].fetch_add(us, Ordering::Relaxed);
+    crate::telemetry::phase(2, us);
+}
+
 /// The card's clock, for the frame line of every run, in microseconds since
 /// the last one: how long the card had nothing of ours queued; how much of
 /// that while the thread that holds the submission lock was working (the
@@ -1713,7 +1723,12 @@ struct Deferred {
     /// has run: the host buffer the list copies the texels into, the title
     /// memory they go to, the bytes of a row, the rows, the title's row
     /// pitch.
-    backs: Vec<(ID3D12Resource, usize, [usize; 3])>,
+    backs: Vec<(
+        ID3D12Resource,
+        usize,
+        [usize; 3],
+        crate::telemetry::Resource,
+    )>,
     /// Whether a step zeroes the indirect-work budget.
     budget_zeroed: bool,
 }
@@ -2469,7 +2484,7 @@ fn relay_wait(why: usize, done: impl Fn(&Line) -> bool) {
     let us = waiting.elapsed().as_micros() as u64;
     LATE_STATS[12].fetch_add(us, Ordering::Relaxed);
     LATE_WAITED[why.min(10)].fetch_add(us, Ordering::Relaxed);
-    SUBMISSION_US[1].fetch_add(us, Ordering::Relaxed);
+    submission_time(1, us);
 }
 
 /// What the thread that lands flights fetches card copies' pieces with
@@ -2820,13 +2835,14 @@ fn declared_writes(runs: &[&HostList]) -> Vec<Declared> {
 /// without it, so the title read a buffer nobody wrote, as before read-backs
 /// were made (the exposure metering's two small float targets, every frame).
 fn read_backs(list: &HostList) {
-    for (buffer, at, [row, rows, pitch]) in &list.deferred().backs {
+    for (buffer, at, [row, rows, pitch], telemetry) in &list.deferred().backs {
         let mut data = std::ptr::null_mut();
         // SAFETY: a read-back buffer of ours, written by the list that has
         // run; the title's destination holds every row (checked when the
         // copy was recorded).
         unsafe {
             if buffer.Map(0, None, Some(&mut data)).is_ok() && !data.is_null() {
+                telemetry.readback((row * rows) as u64, "explicit-guest-texture-to-buffer-copy");
                 let from = data.cast::<u8>().cast_const();
                 for line in 0..*rows {
                     std::ptr::copy_nonoverlapping(
@@ -3696,7 +3712,7 @@ impl Host {
                         shadow.copy_back_done(ranges);
                     }
                 }
-                COPY_BACK[0].fetch_add(landing.elapsed().as_micros() as u64, Ordering::Relaxed);
+                back_time(landing.elapsed().as_micros() as u64);
                 RELAY_STATS[0].fetch_add(1, Ordering::Relaxed);
                 RELAY_STATS[1].fetch_add(flights.len() as u64, Ordering::Relaxed);
             }
@@ -4122,7 +4138,7 @@ impl Host {
                 let gpu = waiting.elapsed();
                 LATE_STATS[12].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
                 LATE_WAITED[why.min(10)].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
-                SUBMISSION_US[1].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
+                submission_time(1, gpu.as_micros() as u64);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::card_waited(gpu.as_micros() as u64, || {
                     format!("{flights} submissions sent ahead, settled together")
@@ -4172,7 +4188,7 @@ impl Host {
                     }
                 }
                 hand_back(&back);
-                COPY_BACK[0].fetch_add(copying.elapsed().as_micros() as u64, Ordering::Relaxed);
+                back_time(copying.elapsed().as_micros() as u64);
             }
             // In the order given: what tells the title the card is done.
             let mut last = 0;
@@ -4378,9 +4394,9 @@ impl Host {
                 .iter()
                 .flat_map(|l| l.deferred().writes.clone())
                 .collect();
-            SUBMISSION_US[0].fetch_add(
+            submission_time(
+                0,
                 (prepared - started).saturating_sub(settled).as_micros() as u64,
-                Ordering::Relaxed,
             );
             submitting(0, 0);
             #[cfg(feature = "diagnostics")]
@@ -4467,8 +4483,8 @@ impl Host {
         FINISHED.store(this_submission, Ordering::Release);
         bury(this_submission);
         let gpu = prepared.elapsed();
-        SUBMISSION_US[0].fetch_add((prepared - started).as_micros() as u64, Ordering::Relaxed);
-        SUBMISSION_US[1].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
+        submission_time(0, (prepared - started).as_micros() as u64);
+        submission_time(1, gpu.as_micros() as u64);
         #[cfg(feature = "diagnostics")]
         crate::copystat::card_waited(gpu.as_micros() as u64, || {
             let pipelines: std::collections::BTreeSet<String> = runs
@@ -4539,7 +4555,7 @@ impl Host {
             add(C::NothingBack, 1);
             add(C::NothingBackUs, gpu.as_micros() as u64);
         }
-        COPY_BACK[0].fetch_add(copying.elapsed().as_micros() as u64, Ordering::Relaxed);
+        back_time(copying.elapsed().as_micros() as u64);
         for list in runs {
             // Read backs first: a value written at the bottom of the pipe
             // may be what tells the title that they are there.
@@ -5450,10 +5466,14 @@ impl HostList {
         buffer: ID3D12Resource,
         dst: *mut u8,
         [row, rows, pitch]: [usize; 3],
+        shape: crate::telemetry::Shape,
     ) {
-        self.deferred()
-            .backs
-            .push((buffer, dst as usize, [row, rows, pitch]));
+        self.deferred().backs.push((
+            buffer,
+            dst as usize,
+            [row, rows, pitch],
+            crate::telemetry::Resource::new(shape),
+        ));
     }
 
     /// Stores `what` (`bytes` of it) at `dst` once the list has run.
@@ -6238,6 +6258,12 @@ impl Meter {
 
     /// Counts a presented frame.
     fn frame(&mut self, hwnd: HWND) {
+        let flights = line()
+            .line
+            .iter()
+            .filter(|f| matches!(f, Late::Run(_)))
+            .count();
+        crate::telemetry::present(flights);
         static RECORD: OnceLock<bool> = OnceLock::new();
         if *RECORD.get_or_init(|| std::env::var_os("STARPORT_RECORD").is_some_and(|v| v == "1")) {
             let now = std::time::Instant::now();

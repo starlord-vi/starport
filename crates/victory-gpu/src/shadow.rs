@@ -26,6 +26,7 @@ use crate::watch::PAGE;
 
 /// A title buffer's host copy.
 pub(crate) struct Shadow {
+    telemetry: crate::telemetry::Resource,
     pub(crate) buffer: ID3D12Resource,
     data: *mut u8,
     gpu: u64,
@@ -1889,6 +1890,14 @@ impl Shadow {
         LIVE[0].fetch_add(1, Ordering::Relaxed);
         LIVE[1].fetch_add(len, Ordering::Relaxed);
         Shadow {
+            telemetry: crate::telemetry::Resource::new(crate::telemetry::Shape {
+                guest: start,
+                width: len,
+                height: 1,
+                layers: 1,
+                format: 0,
+                kind: "buffer",
+            }),
             buffer,
             data,
             gpu,
@@ -2099,6 +2108,8 @@ impl Shadow {
         let snapshot = self.before.lock().unwrap_or_else(|e| e.into_inner());
         let mut written = 0;
         let (from, to) = self.inside(address, len);
+        self.telemetry
+            .readback((to - from) as u64, "shader-write-cpu-merge-scan");
         let start = self.start as usize;
         self.compared(from, to);
         if let Some(before) = &*snapshot
@@ -2707,6 +2718,11 @@ impl Shadow {
         // SAFETY: inside the mapping (`from` and `to` are within the buffer).
         let at = unsafe { self.data.add(from - start) };
         crate::host::copy_mapped(at, from as *const u8, to - from, false);
+        self.telemetry.upload(
+            (from - start) as u64,
+            (to - from) as u64,
+            crate::telemetry::Reason::FirstUpload,
+        );
         // After the bytes are in: a snapshot taken meanwhile is not current.
         self.changed(from - start, to - start);
         self.card_changed(from - start, to - start);
@@ -2800,6 +2816,8 @@ impl Shadow {
     /// sends it up before the next submission. `title` is scratch memory.
     /// Returns the bytes written to title memory.
     pub(crate) fn card_merge(&self, at: usize, gpu: &[u8], title: &mut Vec<u8>) -> usize {
+        self.telemetry
+            .readback(gpu.len() as u64, "gpu-dirty-piece-merge");
         let start = self.start as usize;
         if self.card.is_none() || at + gpu.len() > self.len as usize {
             return 0;
@@ -2867,6 +2885,8 @@ impl Shadow {
         fetched_after: u64,
         title: &mut Vec<u8>,
     ) -> usize {
+        self.telemetry
+            .readback(gpu.len() as u64, "gpu-dirty-piece-merge");
         let start = self.start as usize;
         let Some(card) = &self.card else {
             return 0;

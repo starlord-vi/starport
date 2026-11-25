@@ -1136,7 +1136,21 @@ fn read_back(
             host_box,
         )
     };
-    list.defer_read_back(buffer, data, [row as usize, rows as usize, pitch as usize]);
+    // SAFETY: the source texture is live for this recorded copy.
+    let desc = unsafe { texture.GetDesc() };
+    list.defer_read_back(
+        buffer,
+        data,
+        [row as usize, rows as usize, pitch as usize],
+        crate::telemetry::Shape {
+            guest: src.resource as u64,
+            width: desc.Width,
+            height: desc.Height,
+            layers: desc.DepthOrArraySize,
+            format: desc.Format.0 as u32,
+            kind: "texture",
+        },
+    );
     Ok(())
 }
 

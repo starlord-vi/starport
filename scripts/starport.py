@@ -141,6 +141,7 @@ def main():
     settings = {
         'VICTORY_LOG': 'info',
         'STARPORT_RECORD': '1',
+        'STARPORT_TELEMETRY': os.environ.get('STARPORT_TELEMETRY', '1'),
         'STARPORT_SERIES_S': '1' if args.console == 'series-s' else '0',
         'STARPORT_SKIP_TOP_MIP': '1' if args.skip_top_mip else '0',
         'VICTORY_AMBIENT': args.ambient,

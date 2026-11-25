@@ -694,7 +694,9 @@ impl State {
             resource=format_args!("{resource:#x}"), root=slot, offset_dwords=offset,
             "ambient fallback resolve binding matched")
         });
-        crate::ambient::raise(list, *resource as This, &view)
+        let hit = crate::ambient::raise(list, *resource as This, &view);
+        crate::telemetry::ambient(hit, *resource as u64);
+        hit
     }
 
     /// The user-data value of a root argument, as translated shaders read
@@ -1808,6 +1810,11 @@ impl State {
 
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
+        if crate::telemetry::enabled()
+            && let Some(hash) = crate::pipeline::guarded_compute_hash(self.pipeline as This)
+        {
+            crate::telemetry::refused(&hash);
+        }
         // It may write the arguments a window holds clamped.
         self.window = None;
         #[cfg(feature = "diagnostics")]

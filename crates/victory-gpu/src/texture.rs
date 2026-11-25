@@ -33,6 +33,7 @@ macro_rules! once {
 /// A texture's upload state: the staging buffer laid out as the host
 /// texture's subresources, and what was last detiled.
 pub(crate) struct Staging {
+    telemetry: crate::telemetry::Resource,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     layout: victory_formats::texture::Layout,
@@ -603,6 +604,11 @@ impl Staging {
         STAGED[1].fetch_sub(last.linear.len() as u64, Relaxed);
         last.linear = Vec::new();
         self.dirty.store(false, Relaxed);
+        self.telemetry.upload(
+            0,
+            self.bytes,
+            crate::telemetry::Reason::initial(self.first_mip, false),
+        );
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexUploads, 1);
         Some(Upload {
@@ -1087,6 +1093,14 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     STAGED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     STAGED[1].fetch_add(total, std::sync::atomic::Ordering::Relaxed);
     let s = Arc::new(Staging {
+        telemetry: crate::telemetry::Resource::new(crate::telemetry::Shape {
+            guest: resource as u64,
+            width: d.Width,
+            height: d.Height,
+            layers: d.DepthOrArraySize,
+            format: d.Format.0 as u32,
+            kind: "texture",
+        }),
         footprints,
         rows,
         layout,
