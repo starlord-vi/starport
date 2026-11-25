@@ -14,6 +14,71 @@ use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
 
 static PATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LIVE_HEAPS: std::sync::LazyLock<Mutex<Vec<std::sync::Weak<HostHeap>>>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+pub(crate) fn register(heap: &std::sync::Arc<HostHeap>) {
+    LIVE_HEAPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(std::sync::Arc::downgrade(heap));
+}
+
+/// Called only under the host submission lock with every submission complete.
+/// Recorded dynamic table slots retain their resources; they cannot be patched.
+pub(crate) fn patch_cold_resource(key: usize, frame: u64) -> Option<u64> {
+    if crate::host::started_submission() != crate::host::finished_submission() {
+        return None;
+    }
+    let heaps: Vec<_> = {
+        let mut registry = LIVE_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let heaps = registry
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        registry.retain(|h| h.strong_count() > 0);
+        heaps
+    };
+    let mut targets = Vec::new();
+    for h in heaps {
+        let slots = h
+            .resident_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slots(key);
+        if slots.iter().any(|&s| s >= h.count) {
+            return None;
+        }
+        targets.push((h, slots));
+    }
+    let mut patched = 0;
+    for (h, slots) in targets {
+        let mut made = h.made.lock().unwrap_or_else(|e| e.into_inner());
+        for slot in slots {
+            use windows::core::Interface;
+            let same = h
+                .kept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(slot as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|r| r.as_raw() as usize == key);
+            if !same {
+                continue;
+            }
+            if made.get(slot as usize).is_none_or(|key| *key == 0) {
+                return None;
+            }
+            h.unmake(&mut made, slot);
+            h.textures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .changed(slot, frame, frame + 30);
+            patched += 1;
+        }
+    }
+    Some(patched)
+}
 
 pub(crate) fn patched_count() -> u64 {
     PATCHED.load(std::sync::atomic::Ordering::Relaxed)
@@ -97,21 +162,27 @@ pub(crate) struct HostHeap {
 }
 
 #[derive(Default)]
-struct ResidentViews(std::collections::HashMap<usize, u32>);
+struct ResidentViews(std::collections::HashMap<usize, std::collections::BTreeSet<u32>>);
 
 impl ResidentViews {
-    fn replace(&mut self, old: Option<usize>, new: Option<usize>) {
+    fn replace(&mut self, index: u32, old: Option<usize>, new: Option<usize>) {
         if let Some(old) = old
             && let Some(count) = self.0.get_mut(&old)
         {
-            *count -= 1;
-            if *count == 0 {
+            count.remove(&index);
+            if count.is_empty() {
                 self.0.remove(&old);
             }
         }
         if let Some(new) = new {
-            *self.0.entry(new).or_default() += 1;
+            self.0.entry(new).or_default().insert(index);
         }
+    }
+
+    fn slots(&self, key: usize) -> Vec<u32> {
+        self.0
+            .get(&key)
+            .map_or_else(Vec::new, |s| s.iter().copied().collect())
     }
 }
 
@@ -1265,7 +1336,7 @@ impl HostHeap {
             self.resident_views
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .replace(old_key, new_key);
+                .replace(index, old_key, new_key);
             if let Some(old) = std::mem::replace(slot, resource) {
                 crate::host::retire(old);
             }
@@ -2177,18 +2248,22 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                     let mips = u32::from(unsafe { texture.GetDesc() }.MipLevels);
                     rebase_streaming_srv(desc, crate::resource::host_first_mip(resource), mips);
                 }
-                if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
+                if !fits(
+                    &texture.texture,
+                    desc.as_mut().map(|d| &mut d.Format),
+                    false,
+                ) {
                     return None;
                 }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {
                     device.CreateShaderResourceView(
-                        texture,
+                        &texture.texture,
                         desc.as_ref().map(std::ptr::from_ref),
                         at,
                     )
                 };
-                Some(Some(texture.clone()))
+                Some(Some(texture.texture.clone()))
             } else if let (Some((data, len)), Some(desc)) =
                 (crate::resource::buffer_bytes(resource), desc)
             {
@@ -2236,7 +2311,7 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                     desc = Some(view);
                     twin
                 }
-                None => texture,
+                None => &texture.texture,
             };
             if !fits(texture, desc.as_mut().map(|d| &mut d.Format), true) {
                 return None;
@@ -2517,14 +2592,14 @@ mod tests {
     #[test]
     fn resident_view_census_tracks_shared_and_released_slots() {
         let mut views = ResidentViews::default();
-        views.replace(None, Some(10));
-        views.replace(None, Some(10));
-        views.replace(Some(10), Some(20));
-        assert_eq!(views.0.get(&10), Some(&1));
-        assert_eq!(views.0.get(&20), Some(&1));
-        views.replace(Some(10), None);
-        views.replace(Some(20), None);
-        views.replace(Some(30), None); // an untracked buffer
+        views.replace(0, None, Some(10));
+        views.replace(1, None, Some(10));
+        views.replace(1, Some(10), Some(20));
+        assert_eq!(views.slots(10), [0]);
+        assert_eq!(views.slots(20), [1]);
+        views.replace(0, Some(10), None);
+        views.replace(1, Some(20), None);
+        views.replace(2, Some(30), None);
         assert!(views.0.is_empty());
     }
 

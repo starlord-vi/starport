@@ -221,8 +221,14 @@ pub(crate) fn present(flights: usize) {
         overflow_attribution_bytes=frame.overflow_bytes, ambient_hits=frame.ambient_hits,
         live_texture_bytes=crate::resource::HOST_TEXTURES[1].load(Relaxed),
         waiting_texture_slots=crate::draw::HEAP_TEXTURES_WAITING.load(Relaxed),
+        waiting_due_slots=crate::draw::HEAP_TEXTURES_QUEUE[1].load(Relaxed),
+        waiting_unmapped_slots=crate::draw::HEAP_TEXTURES_QUEUE[2].load(Relaxed),
+        waiting_partial_slots=crate::draw::HEAP_TEXTURES_QUEUE[3].load(Relaxed),
         evicted_textures=crate::residency::counters()[0], patched_descriptors=crate::descriptor::host::patched_count(),
         cumulative_fallback_descriptor_writes=crate::fallback::writes(),
+        eviction_patched_descriptors=crate::residency::details()[0],
+        eviction_pinned_candidates=crate::residency::details()[1],
+        overwrite_invalidations=crate::residency::details()[2],
         "sampled presented-frame attribution; phases are CPU wall times, recording may precede submission");
     for back in [false, true] {
         let mut resources: Vec<_> = frame

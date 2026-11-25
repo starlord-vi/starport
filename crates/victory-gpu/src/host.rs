@@ -85,6 +85,14 @@ pub(crate) fn finished_submission() -> u64 {
     FINISHED.load(Ordering::Acquire)
 }
 
+#[cfg(test)]
+pub(crate) fn idle_for_test<R>(f: impl FnOnce() -> R) -> R {
+    let host = host().expect("D3D12 test device");
+    let mut submitted = host.submitted.lock().unwrap_or_else(|e| e.into_inner());
+    host.settle(&mut submitted, WHY_SYNC);
+    f()
+}
+
 /// A retired object, dropped on whatever thread finishes the submission.
 struct Retired(#[allow(dead_code)] Box<dyn std::any::Any>);
 // SAFETY: what is retired is D3D12 objects (free-threaded) and the
@@ -4924,10 +4932,9 @@ impl HostList {
         &self,
         resource: crate::object::This,
         wanted: u32,
-    ) -> Option<(&'static ID3D12Resource, u32)> {
-        let texture = crate::resource::host_resource(resource)?;
+    ) -> Option<(ID3D12Resource, u32)> {
         let copy = crate::resource::host_copy(resource)?;
-        let wanted = legal_state(texture, wanted);
+        let wanted = legal_state(&copy.texture, wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         match states.entry(std::sync::Arc::as_ptr(&copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
@@ -4936,7 +4943,7 @@ impl HostList {
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let before = std::mem::replace(&mut o.get_mut().1, wanted);
-                (before != wanted).then_some((texture, before))
+                (before != wanted).then(|| (o.get().2.texture.clone(), before))
             }
         }
     }

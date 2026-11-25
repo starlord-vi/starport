@@ -547,20 +547,20 @@ impl State {
             self.targets.push(record.resource as usize);
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
-            rtvs.push(host.rtv(Some(texture), record.desc().as_ref()));
+            rtvs.push(host.rtv(Some(&texture.texture), record.desc().as_ref()));
         }
         self.depth = 0;
         self.depth_state = DEPTH_WRITE;
         let dsv = crate::descriptor::dsv_record(depth).and_then(|record| {
             let texture = crate::resource::host_resource(record.resource)?;
             self.depth = record.resource as usize;
-            self.depth_state = depth_state(texture, record.depth_desc().as_ref());
+            self.depth_state = depth_state(&texture.texture, record.depth_desc().as_ref());
             if crate::resource::depth_and_unordered(record.resource) {
                 crate::resource::DEPTH_UNORDERED[1].fetch_add(1, Ordering::Relaxed);
             }
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
-            Some(host.dsv(texture, record.depth_desc().as_ref()))
+            Some(host.dsv(&texture.texture, record.depth_desc().as_ref()))
         });
         // SAFETY: an open list; the views were just made.
         unsafe {
@@ -1709,8 +1709,8 @@ impl State {
                     continue;
                 }
             };
-            let title_fills =
-                crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
+            let title_fills = crate::resource::host_resource(resource)
+                .is_some_and(|t| crate::texture::title_written(&t.texture));
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);
@@ -2783,9 +2783,9 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
                 .is_some_and(|source| crate::texture::alias(list, *resource as This, source));
             if !aliased
                 && let Some(t) = crate::resource::host_resource(*resource as This)
-                && crate::texture::title_written(t)
+                && crate::texture::title_written(&t.texture)
             {
-                crate::texture::upload(list, *resource as This, t);
+                crate::texture::upload(list, *resource as This, &t.texture);
             }
             // A depth texture shaders also write: what they wrote, first.
             list.twin_use(*resource as This, false, false);

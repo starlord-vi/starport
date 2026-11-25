@@ -166,6 +166,9 @@ def main():
         settings['STARPORT_SKIP_MIPS'] = str(mip_override)
     if 'STARPORT_SKIP_MIPS_MIN_DIM' in os.environ:
         settings['STARPORT_SKIP_MIPS_MIN_DIM'] = os.environ['STARPORT_SKIP_MIPS_MIN_DIM']
+    for name in ('STARPORT_RESIDENCY', 'STARPORT_LEGACY_RESIDENCY', 'STARPORT_VRAM_TARGET_PCT'):
+        if name in os.environ:
+            settings[name] = os.environ[name]
     if args.preset != 'baseline':
         settings.update(VICTORY_TEXTURE_NO_WAIT='1', VICTORY_JOIN_COPIES='1', VICTORY_WIDE_REFRESH='1')
     if args.preset == 'throughput':

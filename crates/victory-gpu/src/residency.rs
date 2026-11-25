@@ -1,6 +1,5 @@
-//! Fence-aware residency for CPU-backed streaming textures. Eviction keeps
-//! resource addresses and descriptors valid; every submitted list restores
-//! and pins its explicit textures and its heaps' bindless textures first.
+//! Descriptor-patched reclamation of CPU-owned streaming shadows. Legacy
+//! Evict/MakeResident remains explicitly selectable. Recorded owners pin data.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -16,14 +15,89 @@ struct Entry {
     bytes: u64,
     last_submission: u64,
     resident: bool,
+    range: (usize, usize),
+    invalidated: bool,
 }
 
 static TEXTURES: LazyLock<Mutex<HashMap<usize, Entry>>> = LazyLock::new(Mutex::default);
 static EVICTED: AtomicU64 = AtomicU64::new(0);
 static EVICTED_BYTES: AtomicU64 = AtomicU64::new(0);
 static RESTORED: AtomicU64 = AtomicU64::new(0);
+static PATCHES: AtomicU64 = AtomicU64::new(0);
+static PINNED: AtomicU64 = AtomicU64::new(0);
+static INVALIDATED: AtomicU64 = AtomicU64::new(0);
+static CHANGES: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+static BOUNDS: [AtomicU64; 2] = [AtomicU64::new(u64::MAX), AtomicU64::new(0)];
+
+pub(crate) fn legacy() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STARPORT_LEGACY_RESIDENCY").is_some_and(|v| v == "1"))
+}
+fn enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STARPORT_RESIDENCY").is_none_or(|v| v != "0"))
+}
+pub(crate) fn target_pct() -> u64 {
+    static PCT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *PCT.get_or_init(|| {
+        std::env::var("STARPORT_VRAM_TARGET_PCT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| (50..=95).contains(n))
+            .unwrap_or(85)
+    })
+}
+pub(crate) fn note_overwrite(at: usize, len: usize) {
+    if !enabled() || legacy() || len == 0 {
+        return;
+    }
+    let end = at.saturating_add(len);
+    if (end as u64) <= BOUNDS[0].load(Relaxed) || at as u64 >= BOUNDS[1].load(Relaxed) {
+        return;
+    }
+    let mut changes = CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = changes.last_mut()
+        && at <= last.1
+        && end >= last.0
+    {
+        *last = (last.0.min(at), last.1.max(end));
+    } else {
+        changes.push((at, end));
+    }
+    if changes.len() > 8192 {
+        let first = changes.iter().map(|v| v.0).min().unwrap_or(at);
+        let last = changes.iter().map(|v| v.1).max().unwrap_or(end);
+        changes.clear();
+        changes.push((first, last));
+    }
+}
+
+pub(crate) fn uploaded(key: usize) {
+    let mut held = Vec::new();
+    let mut entries = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = entries.get_mut(&key) {
+        entry.invalidated = false;
+        if let Some(texture) = entry.texture.upgrade() {
+            texture
+                .last_used_frame
+                .store(crate::frame::current(), Relaxed);
+            held.push(texture);
+        }
+    }
+}
 
 pub(crate) fn track(texture: &std::sync::Arc<HostTexture>, guest: usize, bytes: u64) {
+    let range = crate::resource::texture_memory(guest as crate::object::This)
+        .map(|(at, desc)| {
+            let len = crate::resource::texture_layout(&desc)
+                .map_or(0, |t| t.planes[0].layout.size as usize);
+            (at as usize, (at as usize).saturating_add(len))
+        })
+        .unwrap_or((0, 0));
+    if range.0 < range.1 {
+        BOUNDS[0].fetch_min(range.0 as u64, Relaxed);
+        BOUNDS[1].fetch_max(range.1 as u64, Relaxed);
+    }
     TEXTURES.lock().unwrap_or_else(|e| e.into_inner()).insert(
         texture.texture.as_raw() as usize,
         Entry {
@@ -32,6 +106,8 @@ pub(crate) fn track(texture: &std::sync::Arc<HostTexture>, guest: usize, bytes: 
             bytes,
             last_submission: 0,
             resident: true,
+            range,
+            invalidated: false,
         },
     );
 }
@@ -61,7 +137,9 @@ pub(crate) fn descriptor_kept(resource: &ID3D12Resource) -> bool {
     let mut held = Vec::new();
     let mut entries = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = entries.get_mut(&(resource.as_raw() as usize)) {
-        resident(entry, resource);
+        if legacy() {
+            resident(entry, resource);
+        }
         entry.last_submission = entry.last_submission.max(crate::host::started_submission());
         if let Some(texture) = entry.texture.upgrade() {
             texture
@@ -85,11 +163,15 @@ pub(crate) fn prepare(resources: impl IntoIterator<Item = usize>, submission: u6
         let Some(texture) = entry.texture.upgrade() else {
             continue;
         };
-        resident(entry, &texture.texture);
+        if legacy() {
+            resident(entry, &texture.texture);
+        }
         entry.last_submission = entry.last_submission.max(submission);
-        texture
-            .last_used_frame
-            .store(crate::frame::current(), Relaxed);
+        if legacy() {
+            texture
+                .last_used_frame
+                .store(crate::frame::current(), Relaxed);
+        }
         held.push(texture);
     }
 }
@@ -137,7 +219,7 @@ pub(crate) fn eviction_roundtrip(texture: &std::sync::Arc<HostTexture>) {
     assert!(entry.resident);
 }
 
-pub(crate) fn sweep() {
+fn legacy_sweep() {
     let Some(host) = crate::host::host() else {
         return;
     };
@@ -194,6 +276,136 @@ pub(crate) fn sweep() {
     }
 }
 
+pub(crate) fn details() -> [u64; 3] {
+    [
+        PATCHES.load(Relaxed),
+        PINNED.load(Relaxed),
+        INVALIDATED.load(Relaxed),
+    ]
+}
+fn overlaps(a: (usize, usize), b: (usize, usize)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+fn merged_changes(mut changes: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    changes.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for r in changes {
+        if let Some(last) = out.last_mut()
+            && r.0 <= last.1
+        {
+            last.1 = last.1.max(r.1);
+        } else {
+            out.push(r);
+        }
+    }
+    out
+}
+fn changed(range: (usize, usize), changes: &[(usize, usize)]) -> bool {
+    let at = changes.partition_point(|r| r.1 <= range.0);
+    changes.get(at).is_some_and(|&r| overlaps(range, r))
+}
+fn eviction_key(invalidated: bool, last: u64, key: usize) -> (bool, u64, usize) {
+    (!invalidated, last, key)
+}
+
+pub(crate) fn sweep() {
+    static LOG: std::sync::Once = std::sync::Once::new();
+    LOG.call_once(||tracing::info!(target:"starport::residency",enabled=enabled(),legacy=legacy(),target_pct=target_pct(),cold_frames=90,
+        "streaming residency policy; recorded owners and unfinished submissions remain pinned"));
+    if !enabled() {
+        return;
+    }
+    if legacy() {
+        legacy_sweep();
+        return;
+    }
+    // Called under the submission mutex: no new execution can begin.
+    if crate::host::started_submission() != crate::host::finished_submission() {
+        return;
+    }
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    let [budget, used, ..] = host.video_memory().unwrap_or([0; 4]);
+    let target = budget / 100 * target_pct();
+    let pressure = budget > 0 && used >= target;
+    let mut reclaim = if pressure {
+        used.saturating_sub(budget / 100 * target_pct().saturating_sub(5))
+    } else {
+        0
+    };
+    let changes = merged_changes(std::mem::take(
+        &mut *CHANGES.lock().unwrap_or_else(|e| e.into_inner()),
+    ));
+    let frame = crate::frame::current();
+    let finished = crate::host::finished_submission();
+    let (mut candidates, mut held) = (Vec::new(), Vec::new());
+    {
+        let mut entries = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+        for (&key, entry) in entries.iter_mut() {
+            if !entry.invalidated && changed(entry.range, &changes) {
+                entry.invalidated = true;
+                INVALIDATED.fetch_add(1, Relaxed);
+            }
+            let Some(texture) = entry.texture.upgrade() else {
+                continue;
+            };
+            let last = texture.last_used_frame.load(Relaxed);
+            let eligible = if entry.invalidated {
+                entry.last_submission <= finished
+            } else {
+                pressure && cold(last, frame, entry.last_submission, finished)
+            };
+            if eligible && std::sync::Arc::strong_count(&texture) == 2 {
+                candidates.push((
+                    !entry.invalidated,
+                    last,
+                    key,
+                    entry.guest,
+                    texture.epoch,
+                    entry.bytes,
+                    texture,
+                ));
+            } else {
+                if eligible {
+                    PINNED.fetch_add(1, Relaxed);
+                }
+                held.push(texture);
+            }
+        }
+    }
+    drop(held);
+    candidates.sort_unstable_by_key(|c| eviction_key(!c.0, c.1, c.2));
+    let mut processed = 0;
+    for (not_invalid, last, key, guest, epoch, bytes, texture) in candidates {
+        if processed >= 64 {
+            break;
+        }
+        if not_invalid && reclaim == 0 {
+            continue;
+        }
+        if texture.last_used_frame.load(Relaxed) != last {
+            continue;
+        }
+        let Some(patched) = crate::descriptor::host::patch_cold_resource(key, frame) else {
+            PINNED.fetch_add(1, Relaxed);
+            continue;
+        };
+        PATCHES.fetch_add(patched, Relaxed);
+        drop(texture);
+        if crate::resource::reclaim_streaming(guest, key, epoch) {
+            EVICTED.fetch_add(1, Relaxed);
+            EVICTED_BYTES.fetch_add(bytes, Relaxed);
+            reclaim = reclaim.saturating_sub(bytes);
+            tracing::debug!(target:"starport::residency",guest,bytes,patched,overwrite=!not_invalid,
+                "patched descriptors and released CPU-owned texture shadow");
+        } else {
+            PINNED.fetch_add(1, Relaxed);
+        }
+        processed += 1;
+    }
+}
+
 pub(crate) fn counters() -> [u64; 3] {
     [
         EVICTED.load(Relaxed),
@@ -205,6 +417,21 @@ pub(crate) fn counters() -> [u64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lru_and_overwrite_priority_are_deterministic() {
+        let mut entries = [(false, 12, 4), (false, 2, 7), (true, 20, 1), (false, 2, 3)];
+        entries.sort_by_key(|&(invalid, last, key)| eviction_key(invalid, last, key));
+        assert_eq!(
+            entries,
+            [(true, 20, 1), (false, 2, 3), (false, 2, 7), (false, 12, 4)]
+        );
+        assert!(!overlaps((10, 20), (20, 30)));
+        assert!(overlaps((10, 20), (19, 30)));
+        let changes = merged_changes(vec![(20, 30), (4, 10), (8, 20), (90, 100)]);
+        assert_eq!(changes, [(4, 30), (90, 100)]);
+        assert!(changed((8, 12), &changes));
+        assert!(!changed((30, 90), &changes));
+    }
 
     #[test]
     fn eviction_waits_for_both_age_and_completed_fence() {

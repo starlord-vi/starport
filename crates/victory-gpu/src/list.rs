@@ -695,7 +695,12 @@ pub(crate) struct Barrier {
 #[cfg(windows)]
 fn host_barrier(list: &crate::host::HostList, b: &Barrier) -> Option<Barrier> {
     use windows::core::Interface;
-    let host = |r: This| crate::resource::host_resource(r).map(|h| h.as_raw().cast_const().cast());
+    let host = |r: This| {
+        crate::resource::host_resource(r).map(|h| {
+            list.keep(&h.texture);
+            h.as_raw().cast_const().cast()
+        })
+    };
     match b.kind {
         0 => {
             // A split barrier's first half: its second half transitions.
@@ -712,7 +717,7 @@ fn host_barrier(list: &crate::host::HostList, b: &Barrier) -> Option<Barrier> {
                 flags: 0,
                 first: texture.as_raw().cast_const().cast(),
                 second: 0xffff_ffff | (u64::from(before) << 32),
-                last: u64::from(crate::host::legal_state(texture, wanted)),
+                last: u64::from(crate::host::legal_state(&texture, wanted)),
             })
         }
         1 => Some(Barrier {
@@ -800,8 +805,8 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
 pub(crate) fn ensure_state(list: &crate::host::HostList, resource: This, state: u32) {
     use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATES as State;
     if let Some((texture, before)) = list.transition(resource, state) {
-        let state = crate::host::legal_state(texture, state);
-        let barrier = crate::host::transition(texture, State(before as i32), State(state as i32));
+        let state = crate::host::legal_state(&texture, state);
+        let barrier = crate::host::transition(&texture, State(before as i32), State(state as i32));
         // SAFETY: an open list and a live texture.
         unsafe { list.list.ResourceBarrier(&[barrier]) };
     }
@@ -879,8 +884,8 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             }
             // A source the title fills itself is uploaded first (upstream
             // PR #671): a copy read whatever the host texture held.
-            if crate::texture::title_written(from) {
-                crate::texture::upload(list, src, from);
+            if crate::texture::title_written(&from.texture) {
+                crate::texture::upload(list, src, &from.texture);
             }
             // Depth textures shaders also write: what they wrote, first.
             list.twin_use(dst, false, true);
@@ -891,7 +896,7 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             #[cfg(feature = "diagnostics")]
             list.note_op(|| format!("copy resource {src:?} to {dst:?}"));
             // SAFETY: an open list and live textures.
-            unsafe { list.list.CopyResource(to, from) };
+            unsafe { list.list.CopyResource(&to.texture, &from.texture) };
         } else if let (Some((to, a)), Some((from, b))) = (
             crate::resource::buffer_bytes(dst),
             crate::resource::buffer_bytes(src),
@@ -1013,8 +1018,8 @@ extern "system" fn copy_texture_region(
                 return;
             };
             list.twin_use(src.resource, false, false);
-            if crate::texture::title_written(texture) {
-                crate::texture::upload(list, src.resource, texture);
+            if crate::texture::title_written(&texture.texture) {
+                crate::texture::upload(list, src.resource, &texture.texture);
             }
             ensure_state(list, src.resource, COPY_SOURCE);
             from.resource = texture.as_raw().cast_const().cast();
@@ -1106,8 +1111,8 @@ fn read_back(
     // As a texture source of any copy: what shaders wrote to a depth twin
     // and what the title wrote itself first, then the state.
     list.twin_use(src.resource, false, false);
-    if crate::texture::title_written(texture) {
-        crate::texture::upload(list, src.resource, texture);
+    if crate::texture::title_written(&texture.texture) {
+        crate::texture::upload(list, src.resource, &texture.texture);
     }
     ensure_state(list, src.resource, COPY_SOURCE);
     let mut from = src;
@@ -1212,7 +1217,7 @@ extern "system" fn resolve(
             };
             if (a.Width, a.Height) == (b.Width, b.Height) {
                 list.list
-                    .ResolveSubresource(to, dst_sub, from, src_sub, format);
+                    .ResolveSubresource(&to.texture, dst_sub, &from.texture, src_sub, format);
             } else if let Ok(list1) = list.list.cast::<ID3D12GraphicsCommandList1>() {
                 // The console clips a larger source to the destination.
                 let rect = RECT {
@@ -1222,11 +1227,11 @@ extern "system" fn resolve(
                     bottom: a.Height.min(b.Height) as i32,
                 };
                 list1.ResolveSubresourceRegion(
-                    to,
+                    &to.texture,
                     dst_sub,
                     0,
                     0,
-                    from,
+                    &from.texture,
                     src_sub,
                     Some(&rect),
                     format,
@@ -1275,13 +1280,13 @@ extern "system" fn clear_rtv(
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
         const RENDER_TARGET: u32 = 0x4;
-        let rtv = host.rtv(Some(texture), record.desc().as_ref());
+        let rtv = host.rtv(Some(&texture.texture), record.desc().as_ref());
         // SAFETY: an open list, a fresh view of a live texture.
         unsafe {
             if let Some((_, before)) = list.transition(record.resource, RENDER_TARGET) {
                 use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATES as State;
                 list.list.ResourceBarrier(&[crate::host::transition(
-                    texture,
+                    &texture.texture,
                     State(before as i32),
                     State(RENDER_TARGET as i32),
                 )]);
@@ -1329,7 +1334,7 @@ extern "system" fn clear_dsv(
         if crate::resource::depth_and_unordered(record.resource) {
             crate::resource::DEPTH_UNORDERED[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let dsv = host.dsv(texture, record.depth_desc().as_ref());
+        let dsv = host.dsv(&texture.texture, record.depth_desc().as_ref());
         // SAFETY: an open list, a fresh view of a live texture.
         unsafe {
             list.list.ClearDepthStencilView(

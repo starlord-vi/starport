@@ -66,6 +66,30 @@ pub(crate) fn heap<'a>(this: This) -> &'a Heap {
     unsafe { &*this.cast::<Heap>() }
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn test_view_heap(count: u32) -> This {
+    #[repr(C)]
+    struct Extended(HeapDesc, Placement);
+    let extended = Extended(
+        HeapDesc {
+            kind: 0,
+            count,
+            flags: 1,
+            nodes: 0,
+        },
+        Placement {
+            address: 0,
+            size: 0,
+        },
+    );
+    let mut title = std::ptr::null();
+    assert_eq!(
+        create_heap(std::ptr::null(), &extended.0, &HEAP_IIDS[0], &mut title),
+        object::S_OK
+    );
+    title
+}
+
 impl Heap {
     /// Whether this is a sampler heap.
     pub(crate) fn samplers(&self) -> bool {
@@ -94,7 +118,9 @@ impl Heap {
                 for i in pending.drain(..) {
                     h.mirror(i, self.start + u64::from(i) * step, false);
                 }
-                Some(std::sync::Arc::new(h))
+                let h = std::sync::Arc::new(h);
+                host::register(&h);
+                Some(h)
             })
             .as_deref()
     }

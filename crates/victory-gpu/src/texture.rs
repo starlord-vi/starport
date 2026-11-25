@@ -33,6 +33,9 @@ macro_rules! once {
 /// A texture's upload state: the staging buffer laid out as the host
 /// texture's subresources, and what was last detiled.
 pub(crate) struct Staging {
+    epoch: u64,
+    demoted: bool,
+    host_key: usize,
     telemetry: crate::telemetry::Resource,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
@@ -210,9 +213,9 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
     let before = list
         .transition(source, COPY_SOURCE)
         .map(|(texture, before)| {
-            let state = crate::host::legal_state(texture, COPY_SOURCE);
+            let state = crate::host::legal_state(&texture, COPY_SOURCE);
             let barrier = crate::host::transition(
-                texture,
+                &texture,
                 D3D12_RESOURCE_STATES(before as i32),
                 D3D12_RESOURCE_STATES(state as i32),
             );
@@ -253,14 +256,20 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
         list.list
             .ResourceBarrier(&[crate::host::transition(&through.buffer, common, written)]);
         for (index, (of_written, _)) in through.parts.iter().enumerate() {
-            list.list
-                .CopyTextureRegion(&rows(of_written), 0, 0, 0, &part(from, index), None);
+            list.list.CopyTextureRegion(
+                &rows(of_written),
+                0,
+                0,
+                0,
+                &part(&from.texture, index),
+                None,
+            );
         }
         list.list
             .ResourceBarrier(&[crate::host::transition(&through.buffer, written, read)]);
         for (index, (_, of_read)) in through.parts.iter().enumerate() {
             list.list
-                .CopyTextureRegion(&part(to, index), 0, 0, 0, &rows(of_read), None);
+                .CopyTextureRegion(&part(&to.texture, index), 0, 0, 0, &rows(of_read), None);
         }
         list.list
             .ResourceBarrier(&[crate::host::transition(&through.buffer, read, common)]);
@@ -607,8 +616,9 @@ impl Staging {
         self.telemetry.upload(
             0,
             self.bytes,
-            crate::telemetry::Reason::initial(self.first_mip, false),
+            crate::telemetry::Reason::initial(self.first_mip, self.demoted),
         );
+        crate::residency::uploaded(self.host_key);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexUploads, 1);
         Some(Upload {
@@ -1047,10 +1057,20 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
 
 /// The staging state of a title texture, made on first use.
 fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
-    let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
-    let map = map.get_or_insert_with(HashMap::new);
-    if let Some(s) = map.get(&(resource as usize)) {
-        return Some(s.clone());
+    use windows::core::Interface;
+    // Pin the allocation before taking the staging table, not inside it:
+    // reclamation takes the resource lock before removing its staging state.
+    let copy = crate::resource::host_copy(resource)?;
+    if copy.texture.as_raw() != texture.as_raw() {
+        return None;
+    }
+    {
+        let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = map.as_ref().and_then(|m| m.get(&(resource as usize)))
+            && s.epoch == copy.epoch
+        {
+            return Some(s.clone());
+        }
     }
     let (memory, desc) = crate::resource::texture_memory(resource)?;
     let Some(layout) = crate::resource::texture_layout(&desc).map(|t| t.planes[0].layout.clone())
@@ -1093,6 +1113,9 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     STAGED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     STAGED[1].fetch_add(total, std::sync::atomic::Ordering::Relaxed);
     let s = Arc::new(Staging {
+        epoch: copy.epoch,
+        demoted: copy.demoted,
+        host_key: copy.texture.as_raw() as usize,
         telemetry: crate::telemetry::Resource::new(crate::telemetry::Shape {
             guest: resource as u64,
             width: d.Width,
@@ -1105,7 +1128,7 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         rows,
         layout,
         mips: u32::from(d.MipLevels),
-        first_mip: crate::resource::host_first_mip(resource),
+        first_mip: copy.first_mip,
         bytes: total,
         memory,
         last: Mutex::new(Last {
@@ -1115,7 +1138,9 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         dirty: std::sync::atomic::AtomicBool::new(true),
         used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
     });
-    map.insert(resource as usize, s.clone());
+    let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+    map.get_or_insert_with(HashMap::new)
+        .insert(resource as usize, s.clone());
     Some(s)
 }
 

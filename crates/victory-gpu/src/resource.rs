@@ -1136,6 +1136,8 @@ struct Resource {
 /// lists that name it).
 #[cfg(windows)]
 pub(crate) struct HostTexture {
+    pub(crate) epoch: u64,
+    pub(crate) demoted: bool,
     /// Source mip represented by host mip zero (CPU-streamed views only).
     pub(crate) first_mip: u32,
     pub(crate) last_used_frame: std::sync::atomic::AtomicU64,
@@ -1357,6 +1359,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         }
         let state = crate::host::legal_state(&texture, crate::host::texture_state(r.host.state));
         let mut host = HostTexture::new(texture, state);
+        host.demoted = r.host.gone.load(Relaxed);
         host.first_mip = first_mip;
         host.filled = fills(&r.desc);
         if host.filled {
@@ -1386,15 +1389,11 @@ fn hosted(this: This, make: bool) -> Option<Made> {
 /// The host copy of title texture `this` if it is made, without making it
 /// (for diagnostics, which must not count as a use).
 #[cfg(all(windows, feature = "diagnostics"))]
-pub(crate) fn host_made<'a>(
-    this: This,
-) -> Option<&'a windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
+pub(crate) fn host_made(this: This) -> Option<std::sync::Arc<HostTexture>> {
     if this.is_null() {
         return None;
     }
-    let (host, _) = hosted(this, false)?;
-    // SAFETY: as in `host_resource`.
-    Some(unsafe { &*std::ptr::from_ref(&host.texture) })
+    hosted(this, false).map(|(host, _)| host)
 }
 
 /// Whether more host copies of textures the title fills may be made for
@@ -1417,7 +1416,14 @@ pub(crate) fn room() -> bool {
         return filled < limit;
     }
     match crate::host::host().and_then(|h| h.video_memory()) {
-        Some([budget, used, ..]) => used < budget / 5 * 4,
+        Some([budget, used, ..]) => {
+            used < budget / 100
+                * if crate::residency::legacy() {
+                    80
+                } else {
+                    crate::residency::target_pct()
+                }
+        }
         None => filled < WITHOUT_BUDGET,
     }
 }
@@ -1504,6 +1510,49 @@ pub(crate) fn let_go_idle() {
     }
 }
 
+/// Release backing only if no lease, recorded list, descriptor or unfinished
+/// submission can name it. Called under the serialized idle sweep.
+#[cfg(windows)]
+pub(crate) fn reclaim_streaming(guest: usize, key: usize, epoch: u64) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if crate::host::started_submission() != crate::host::finished_submission() {
+        return false;
+    }
+    use windows::core::Interface;
+    let all = textures();
+    if !all.contains(&guest) {
+        return false;
+    }
+    // SAFETY: the table lock prevents this title resource from being freed.
+    let r = unsafe { &*(guest as *const Resource) };
+    if !fills(&r.desc) || crate::texture::host_wrote(guest) {
+        return false;
+    }
+    let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((host, twin)) = made.as_ref() else {
+        return false;
+    };
+    if host.epoch != epoch
+        || host.texture.as_raw() as usize != key
+        || twin.is_some()
+        || std::sync::Arc::strong_count(host) != 1
+        || crate::host::references(&host.texture) != 1
+    {
+        return false;
+    }
+    crate::texture::unstage(guest as This);
+    let Some((host, _)) = made.take() else {
+        return false;
+    };
+    r.host.gone.store(true, Relaxed);
+    KINDS[2].fetch_add(1, Relaxed);
+    KINDS[3].fetch_add(host.bytes, Relaxed);
+    drop(made);
+    drop(all);
+    drop(host);
+    true
+}
+
 /// For the memory line: title textures with a host copy the host renders
 /// to or writes and those copies' bytes (twins included); title textures
 /// without a host copy and the bytes of title memory they are; host copies
@@ -1581,6 +1630,14 @@ fn host_bytes(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) ->
 }
 
 #[cfg(windows)]
+impl std::ops::Deref for HostTexture {
+    type Target = windows::Win32::Graphics::Direct3D12::ID3D12Resource;
+    fn deref(&self) -> &Self::Target {
+        &self.texture
+    }
+}
+
+#[cfg(windows)]
 impl HostTexture {
     fn new(
         texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
@@ -1591,6 +1648,11 @@ impl HostTexture {
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
         HOST_TEXTURES[1].fetch_add(bytes, Relaxed);
         HostTexture {
+            demoted: false,
+            epoch: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, Relaxed)
+            },
             first_mip: 0,
             last_used_frame: std::sync::atomic::AtomicU64::new(crate::frame::current()),
             ambient_view: std::sync::OnceLock::new(),
@@ -1786,32 +1848,26 @@ pub(crate) fn placed_textures() -> u64 {
 /// Moves the host texture to `wanted` (a host texture state); the host
 /// resource and the state it leaves, if that is a change.
 #[cfg(windows)]
-pub(crate) fn host_transition(this: This, wanted: u32) -> Option<(*mut c_void, u32)> {
-    use windows::core::Interface;
+pub(crate) fn host_transition(
+    this: This,
+    wanted: u32,
+) -> Option<(windows::Win32::Graphics::Direct3D12::ID3D12Resource, u32)> {
     let (host, _) = hosted(this, true)?;
     let before = host
         .state
         .swap(wanted, std::sync::atomic::Ordering::Relaxed);
-    (before != wanted).then(|| (host.texture.as_raw(), before))
+    (before != wanted).then(|| (host.texture.clone(), before))
 }
 
 /// The host GPU's copy of a title resource, if it has one: made now if
 /// this is the texture's first use ([`Hosted`]). Asking is a use; what must
 /// not count as one asks `host_made`.
 #[cfg(windows)]
-pub(crate) fn host_resource<'a>(
-    this: This,
-) -> Option<&'a windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
+pub(crate) fn host_resource(this: This) -> Option<std::sync::Arc<HostTexture>> {
     if this.is_null() {
         return None;
     }
-    let (host, _) = hosted(this, true)?;
-    // SAFETY: the resource holds the host copy until the title releases it
-    // (lists and slots that name the texture hold it past that), or until
-    // `let_go_idle` takes it: only from a texture the title fills, that no
-    // list and no slot holds and that nothing asked for in seconds (the
-    // asking just made is noted under the same lock).
-    Some(unsafe { &*std::ptr::from_ref(&host.texture) })
+    hosted(this, true).map(|(host, _)| host)
 }
 
 /// A title texture's host copy, shared, for a list to hold.
@@ -2759,6 +2815,80 @@ mod tests {
     /// then read back from the host GPU.
     #[cfg(windows)]
     #[test]
+    fn patched_streaming_reclaim_preserves_leases_recorded_lists_and_generations() {
+        use windows::Win32::Graphics::Direct3D12::D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        use windows::core::Interface;
+        crate::host::idle_for_test(|| {
+            let null = std::ptr::null();
+            let mut image = null;
+            assert_eq!(
+                create_committed(
+                    null,
+                    &PROPERTIES,
+                    0,
+                    &texture(4, 4, 28, 1),
+                    0,
+                    null.cast(),
+                    &RESOURCE_IIDS[0],
+                    &mut image
+                ),
+                S_OK
+            );
+            let lease = host_resource(image).unwrap();
+            let key = lease.as_raw() as usize;
+            let epoch = lease.epoch;
+            let title_heap = crate::descriptor::test_view_heap(4);
+            let heap = crate::descriptor::heap(title_heap);
+            let mut view = [0u32; 10];
+            view[0] = 28;
+            view[1] = 4;
+            view[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view[5] = 1;
+            crate::descriptor::create_srv(null, image, &view, heap.start);
+            let host_heap = heap.host().unwrap();
+            assert!(host_heap.resident_resources().contains(&key));
+            let list = crate::host::host().unwrap().new_list().unwrap();
+            list.transition(image, 0x80);
+            list.close();
+            assert_eq!(
+                crate::descriptor::host::patch_cold_resource(key, 10),
+                Some(1)
+            );
+            assert!(!host_heap.resident_resources().contains(&key));
+            assert!(
+                host_heap
+                    .texture_slots_due(40, 32)
+                    .0
+                    .iter()
+                    .any(|v| v.0 == 0),
+                "patched slot is queued for re-admission"
+            );
+            assert!(
+                !reclaim_streaming(image as usize, key, epoch),
+                "CPU lease and recorded commands pin the allocation"
+            );
+            drop(lease);
+            assert!(
+                !reclaim_streaming(image as usize, key, epoch),
+                "recorded commands still pin it before reset"
+            );
+            list.reset();
+            list.close();
+            assert!(reclaim_streaming(image as usize, key, epoch));
+            let replacement = host_resource(image).unwrap();
+            assert_ne!(replacement.epoch, epoch);
+            assert!(
+                !reclaim_streaming(image as usize, key, epoch),
+                "old generation cannot release the new allocation"
+            );
+            drop(replacement);
+            slot::<Release>(title_heap, 0x10)(title_heap);
+            slot::<Release>(image, 0x10)(image);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn buffer_data_reaches_the_host_texture() {
         use windows::Win32::Graphics::Direct3D12::*;
         let Some(host) = crate::host::host() else {
@@ -2917,7 +3047,7 @@ mod tests {
         // SAFETY: an open list, live resources, locations in the host layout.
         unsafe {
             back.list.ResourceBarrier(&[crate::host::transition(
-                host_image,
+                &host_image.texture,
                 D3D12_RESOURCE_STATES(before as i32),
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
@@ -3004,7 +3134,7 @@ mod tests {
             let image = images[usize::from(frame - 1) % images.len()];
             let gpu = host_resource(image).unwrap();
             let list = host.new_list().unwrap();
-            crate::texture::upload(&list, image, gpu);
+            crate::texture::upload(&list, image, &gpu.texture);
             crate::list::ensure_state(&list, image, 0x800);
             let to = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: borrowed references; these locations do not release them.
@@ -3025,7 +3155,7 @@ mod tests {
             };
             let from = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: as above.
-                pResource: unsafe { std::mem::transmute_copy(gpu) },
+                pResource: unsafe { std::mem::transmute_copy(&gpu.texture) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                 Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                     SubresourceIndex: 0,
@@ -3079,7 +3209,7 @@ mod tests {
             // The same decoded image can be sampled by another submission
             // before this buffer is reused for a later movie frame.
             let unchanged = host.new_list().unwrap();
-            crate::texture::upload(&unchanged, image, gpu);
+            crate::texture::upload(&unchanged, image, &gpu.texture);
             crate::list::ensure_state(&unchanged, image, 0x80);
             unchanged.close();
             host.execute(&[&unchanged]);
@@ -3100,7 +3230,7 @@ mod tests {
                     (address as *mut u8).write_bytes(0x81 + index as u8, size);
                 }
             });
-            crate::texture::upload(&list, image, gpu);
+            crate::texture::upload(&list, image, &gpu.texture);
             crate::list::ensure_state(&list, image, 0x800);
             let to = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: borrowed references; locations never release them.
@@ -3121,7 +3251,7 @@ mod tests {
             };
             let from = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: as above.
-                pResource: unsafe { std::mem::transmute_copy(gpu) },
+                pResource: unsafe { std::mem::transmute_copy(&gpu.texture) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                 Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                     SubresourceIndex: 0,
@@ -3296,21 +3426,24 @@ mod tests {
         unsafe {
             let l = &list.list;
             // The pattern into the twin, the twin into the depth texture.
-            l.ResourceBarrier(&[moved(twin, written, dest), moved(host_depth, tested, dest)]);
+            l.ResourceBarrier(&[
+                moved(twin, written, dest),
+                moved(&host_depth.texture, tested, dest),
+            ]);
             l.CopyTextureRegion(&whole(twin), 0, 0, 0, &rows(&upload, 0), None);
             l.ResourceBarrier(&[moved(twin, dest, source)]);
-            l.CopyResource(host_depth, twin);
+            l.CopyResource(&host_depth.texture, twin);
             // Zeros over the twin, then the depth texture back into it.
             l.ResourceBarrier(&[moved(twin, source, dest)]);
             l.CopyTextureRegion(&whole(twin), 0, 0, 0, &rows(&upload, 1024), None);
-            l.ResourceBarrier(&[moved(host_depth, dest, source)]);
-            l.CopyResource(twin, host_depth);
+            l.ResourceBarrier(&[moved(&host_depth.texture, dest, source)]);
+            l.CopyResource(twin, &host_depth.texture);
             // The twin read back; both textures to the states they had.
             l.ResourceBarrier(&[moved(twin, dest, source)]);
             l.CopyTextureRegion(&rows(&readback, 0), 0, 0, 0, &whole(twin), None);
             l.ResourceBarrier(&[
                 moved(twin, source, written),
-                moved(host_depth, source, tested),
+                moved(&host_depth.texture, source, tested),
             ]);
         }
         list.close();
@@ -3494,10 +3627,10 @@ mod tests {
         // SAFETY: an open list and live resources; a whole subresource.
         unsafe {
             let l = &back.list;
-            l.ResourceBarrier(&[moved(host_depth, state, source)]);
-            let (to, from) = (rows(&readback, plane), whole(host_depth, 1));
+            l.ResourceBarrier(&[moved(&host_depth.texture, state, source)]);
+            let (to, from) = (rows(&readback, plane), whole(&host_depth.texture, 1));
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
-            l.ResourceBarrier(&[moved(host_depth, source, state)]);
+            l.ResourceBarrier(&[moved(&host_depth.texture, source, state)]);
         }
         back.close();
         host.execute(&[&back]);
@@ -3789,7 +3922,7 @@ float4 lit() : SV_Target { return 1.0; }
         };
         let colour = host.rtv(Some(&target), None);
         let depth_view = host.dsv(
-            host_depth,
+            &host_depth.texture,
             Some(&D3D12_DEPTH_STENCIL_VIEW_DESC {
                 Format: DXGI_FORMAT(45),
                 ViewDimension: D3D12_DSV_DIMENSION_TEXTURE2D,

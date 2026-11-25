@@ -117,4 +117,46 @@ a heap contains one: bindless indices are selected in shaders. No misleading
 sample counter is emitted. The descriptor-write counter is cumulative and
 does not represent live missing slots or sampled draws.
 
+## Task 5: descriptor-patched reclamation
+
+Baseline the earlier stages with `$env:STARPORT_LEGACY_RESIDENCY = '1'`.
+Then set it to `'0'` (new default) while holding resolution, mips and fallback
+color fixed. `STARPORT_RESIDENCY=0` disables reclamation; legacy `1` restores
+the previous conservative Evict/MakeResident path. `STARPORT_VRAM_TARGET_PCT`
+defaults to 85 (accepted range 50..95); admission and reclamation use the same
+DXGI local budget threshold, with a five-percent hysteresis margin.
+
+The new path does not Evict bindless resources. At an idle sweep under the
+submission lock, it orders cold CPU-owned textures by last descriptor
+publication/upload/creation, patches their known static descriptors to typed
+nulls (or the selected debug fallback), and queues those slots for re-admission
+after 30 frames. Ninety frames without such use makes a pressure candidate.
+Known kernel writes and mapping changes invalidate overlapping shadows;
+invalidations are prioritized even below budget. Ordinary content changes
+still use the immutable snapshot/hash/remap protocol. The write journal is
+bounded; exceptionally many changes may coalesce into a conservative range.
+
+Backing is released only after all submissions complete and every recorded
+list, dynamic slot and CPU lease lets go. A recorded list can be replayed even
+after its last fence completes, so its resources remain pinned until reset.
+Owned texture leases replace the old borrowed-pointer helpers. Staging is
+generation-aware, preventing a new shadow from inheriting an old "uploaded"
+state. No mip tail is synthesized here; the selected fallback is used instead.
+
+Check `evicted_textures`, `eviction_patched_descriptors`,
+`eviction_pinned_candidates`, `overwrite_invalidations`,
+`demotion_reupload_bytes`, live texture bytes and waiting slots. Reclamation
+success requires actual evictions and lower live memory; patched descriptors
+alone do not prove memory was freed. Waiting counts also include unmapped or
+partly streamed textures; inspect the separate queue categories. Counters can
+rise before the next frame re-admits waiting textures. Existing local/shared
+DXGI statistics include other allocations; shared memory is not by itself a
+measurement of spilled textures. Lower shared usage and FPS gains require the
+user's controlled world run, not an offline assertion.
+
+Offline integration coverage patches a real descriptor, checks requeueing,
+keeps a resource alive through CPU and recorded-list ownership, then releases
+it after reset and rejects an obsolete allocation generation. LRU ordering,
+range overlap and fence-age eligibility have focused tests.
+
 Further comparisons will be added as their hazard checks are completed.
