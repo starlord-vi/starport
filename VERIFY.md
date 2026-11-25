@@ -197,4 +197,13 @@ copy. Test it separately because it consumes the same limited local VRAM.
 See [Microsoft's GPU upload heap specification](https://microsoft.github.io/DirectX-Specs/d3d/D3D12GPUUploadHeaps.html)
 and [write-watch reset semantics](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-getwritewatch).
 
+## Task 7: demand readback remains deferred
+
+There is no working `STARPORT_READBACK=demand` switch in this build. Retain
+the existing readback behavior for every comparison. The new attribution
+shows explicit texture copies, dirty-piece fetches and buffer merge scans,
+but cannot prove that an unobserved native guest CPU read never happens.
+See [the read-barrier requirements](docs/demand-readback.md). No lower
+copy-back byte count or demand-paging correctness is claimed from this task.
+
 Further comparisons will be added as their hazard checks are completed.
