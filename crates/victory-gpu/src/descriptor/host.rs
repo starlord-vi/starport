@@ -84,6 +84,85 @@ pub(crate) fn patched_count() -> u64 {
     PATCHED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Promotion patches are transactional: if backing cannot be replaced, restore
+/// unchanged slots to their old real tail instead of leaving diagnostic nulls.
+pub(crate) struct PromotionPatch {
+    slots: Vec<(std::sync::Arc<HostHeap>, u32, u64)>,
+}
+impl Drop for PromotionPatch {
+    fn drop(&mut self) {
+        for (heap, index, old) in &self.slots {
+            let mut made = heap.made.lock().unwrap_or_else(|e| e.into_inner());
+            if made.get(*index as usize) != Some(&0) {
+                continue;
+            }
+            let Some(view) = view_at(*old as u32, (*old >> 32) as u32) else {
+                continue;
+            };
+            // After successful replacement make resolves the new full image;
+            // after a refusal it resolves the unchanged tail. A newer slot
+            // publication wins over this restore in either case.
+            let Some(kept) = make(&view, heap.cpu(*index)) else {
+                continue;
+            };
+            heap.keep(*index, kept);
+            made[*index as usize] = *old;
+            heap.note_buffer(*index, Some(&view), true);
+        }
+    }
+}
+pub(crate) fn patch_for_promotion(key: usize, frame: u64) -> Option<PromotionPatch> {
+    if crate::host::started_submission() != crate::host::finished_submission() {
+        return None;
+    }
+    let heaps: Vec<_> = LIVE_HEAPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    let mut targets = Vec::new();
+    for heap in heaps {
+        let slots = heap
+            .resident_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slots(key);
+        if slots.iter().any(|s| *s >= heap.count) {
+            return None;
+        }
+        targets.push((heap, slots));
+    }
+    let mut patch = PromotionPatch { slots: Vec::new() };
+    for (heap, slots) in targets {
+        let mut made = heap.made.lock().unwrap_or_else(|e| e.into_inner());
+        for index in slots {
+            use windows::core::Interface;
+            let same = heap
+                .kept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(index as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|r| r.as_raw() as usize == key);
+            if !same {
+                continue;
+            }
+            let old = *made.get(index as usize)?;
+            if old == 0 {
+                continue;
+            }
+            patch.slots.push((heap.clone(), index, old));
+            heap.unmake(&mut made, index);
+            heap.textures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .changed(index, frame, frame);
+        }
+    }
+    Some(patch)
+}
+
 pub(crate) struct HostHeap {
     pub(crate) heap: ID3D12DescriptorHeap,
     cpu: usize,
@@ -1241,6 +1320,7 @@ impl HostHeap {
                         resource,
                         desc[..10].try_into().ok(),
                         true,
+                        u64::from(desc[10]) | u64::from(desc[11]) << 32,
                     ),
                     View::Shader(resource, desc) => {
                         crate::resource::object_view_words(*resource as _, desc.as_ref())

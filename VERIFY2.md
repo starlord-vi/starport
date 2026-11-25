@@ -14,6 +14,7 @@ From `A:\starport\port` in PowerShell:
 $env:STARPORT_SERIES_S = '0'
 $env:STARPORT_MAX_RES = '1920x1080'
 $env:STARPORT_SKIP_MIPS = '2'
+$env:STARPORT_PROGRESSIVE_TEXTURES = '0' # pass-1 admission for the baseline
 $env:STARPORT_FALLBACK_COLOR = 'black'
 $env:STARPORT_LEGACY_RESIDENCY = '0'
 $env:STARPORT_DIRTY_TRACKING = '1'
@@ -81,5 +82,58 @@ draw recording count over those intervals, memory snapshots at capture start
 and completion, and explicit overlap/unknown-byte metadata. F8 does not infer
 that different scenes have equal work. Compare recorded draws as well as frame
 times, and keep the same flags/cache for a controlled pair.
+
+## Task 1: real mip tails, then promotion
+
+Hold the baseline scene/flags fixed and add:
+
+```powershell
+$env:STARPORT_PROGRESSIVE_TEXTURES = '1'
+$env:STARPORT_TAIL_BUDGET_MB = '512'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+Repeat F8 in the same scene. Progressive mode defaults to 1; 0 restores
+pass-1 admission. Tail budget defaults to 512 MiB (0 disables progressive
+admission; maximum 4096). Only CPU-owned synthetic placed BC 2D/array/cube
+views qualify. GPU-written targets, uncompressed resources and unsupported
+layouts keep the existing path. A source truncated before a <=64px tail with
+three mips remains ineligible; small <=64px chains retain their source mips.
+
+The initial resource contains the smallest four available mips, or three when
+needed to reach <=64px. Only source pages containing their actual BC blocks
+are read, under the existing nonblocking mapping lock; missing pages leave
+the slot waiting. Pixels cannot be recovered from completely unmapped data.
+No all-zero fill is advertised as a recovered tail. A real immutable snapshot
+is retained until its upload and CPU staging is released afterward. Native
+allocation bytes, including committed-resource alignment, reserve the tail
+budget before allocation; a tiny tail can still cost 64 KiB on the GPU. A COM
+lease keeps that reservation until the resource's final native release.
+
+Promotion runs at an idle submission boundary, newest descriptor-use frame
+first, then smaller target allocation, then newer creation. It requires local
+DXGI headroom for the full target in addition to the old tail. At most eight
+attempts and about 16 ms of sorting/query/copy work are budgeted per frame;
+the final initialization operation can exceed that soft time limit. A failed
+attempt retries after two seconds. Missing full source mips, dynamic descriptor
+slots, CPU leases or recorded-list references postpone promotion.
+
+Static descriptor patches are transactional: failed replacement restores the
+real tail. A successful full image is initialized on a serialized private
+queue/fence before descriptors are republished, so previously recorded lists
+cannot sample uninitialized promoted pixels. Ordinary pressure eviction
+excludes tails; known source overwrite invalidation can still release them.
+Per-allocation upload hashes suppress a duplicate full upload after private
+initialization. SRVs and size metadata use the actual effective mip generation.
+
+Check `tail_bytes`, `tail_allocations`, `promoted_textures`,
+`unavailable_tail_attempts`, `promotion_upload_bytes`, waiting queue categories,
+local/non-local DXGI usage and the F8 phase summary. Tail allocation count
+describes backing, not proof a particular draw sampled it. Initial tail uploads
+are included in mip-rebase/first-upload attribution; promotion has its own
+reason. The offline integration test covers partially mapped source pages,
+native lease rejection with descriptor rollback, successful GPU promotion,
+matching size metadata and exact raw BC readback bytes. Lower backlog, real
+blurry surfaces and frame-time changes still require the user's run.
 
 The remaining task comparisons will be added with their implementations.

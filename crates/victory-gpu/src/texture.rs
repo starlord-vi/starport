@@ -34,6 +34,7 @@ macro_rules! once {
 /// texture's subresources, and what was last detiled.
 pub(crate) struct Staging {
     epoch: u64,
+    tail: bool,
     demoted: bool,
     host_key: usize,
     telemetry: Arc<crate::telemetry::Resource>,
@@ -705,6 +706,29 @@ impl Staging {
         let start = self.memory as usize;
         let mut last = waited(0, || self.last.lock().unwrap_or_else(|e| e.into_inner()));
         let last = &mut *last;
+        if self.tail {
+            let Some(pixels) = tail_pixels(
+                &self.layout,
+                self.memory,
+                self.first_mip,
+                self.mips,
+                &self.footprints,
+                self.bytes,
+            ) else {
+                return 0;
+            };
+            let hash = timed_hash(&pixels);
+            let bytes = pixels.len();
+            if last.hash != Some(hash) {
+                use std::sync::atomic::Ordering::Relaxed;
+                STAGED[1].fetch_sub(last.linear.len() as u64, Relaxed);
+                STAGED[1].fetch_add(bytes as u64, Relaxed);
+                last.linear = pixels;
+                last.hash = Some(hash);
+                self.dirty.store(true, Relaxed);
+            }
+            return bytes;
+        }
         if let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, false))
         {
             if last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked) {
@@ -939,6 +963,9 @@ pub(crate) fn staged(resource: This) -> Option<(u64, bool)> {
         let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
         map.as_ref()?.get(&(resource as usize))?.clone()
     };
+    if s.tail {
+        return Some((s.bytes, true));
+    }
     let size = s.layout.size as usize;
     Some((size as u64, committed(s.memory, size)))
 }
@@ -1109,6 +1136,136 @@ pub(crate) fn snapshot_for_test(resource: This, texture: &ID3D12Resource) -> Opt
     staging.take_upload()
 }
 
+/// Native copy footprints, shared by initial tails and later staging.
+fn footprints_of(
+    texture: &ID3D12Resource,
+) -> Option<(
+    D3D12_RESOURCE_DESC,
+    Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
+    Vec<u32>,
+    u64,
+)> {
+    let host = host()?;
+    // SAFETY: a live resource.
+    let d = unsafe { texture.GetDesc() };
+    let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
+        u32::from(d.MipLevels)
+    } else {
+        u32::from(d.MipLevels) * u32::from(d.DepthOrArraySize)
+    };
+    let mut footprints = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
+    let mut rows = vec![0u32; count as usize];
+    let mut total = 0;
+    // SAFETY: outputs for `count` subresources.
+    unsafe {
+        host.device.GetCopyableFootprints(
+            &d,
+            0,
+            count,
+            0,
+            Some(footprints.as_mut_ptr()),
+            Some(rows.as_mut_ptr()),
+            None,
+            Some(&mut total),
+        );
+    }
+    (total != u64::MAX).then_some((d, footprints, rows, total))
+}
+
+/// Read only pages containing the selected BC blocks. Every required page
+/// must be readable; absent tail data never becomes fabricated black pixels.
+fn tail_pixels(
+    layout: &victory_formats::texture::Layout,
+    memory: *const u8,
+    first: u32,
+    levels: u32,
+    footprints: &[D3D12_PLACED_SUBRESOURCE_FOOTPRINT],
+    total: u64,
+) -> Option<Vec<u8>> {
+    let _mapping = crate::watch::title_memory_reading_now()?;
+    if !layout.addressable() || layout.desc.swizzle.xor() || levels == 0 {
+        return None;
+    }
+    let mut pages = std::collections::BTreeMap::<usize, Box<[u8; 4096]>>::new();
+    let mut pixels = vec![0; usize::try_from(total).ok()?];
+    let element = layout.desc.element_bytes as usize;
+    for (i, footprint) in footprints.iter().enumerate() {
+        let mip = first + i as u32 % levels;
+        let slice = i as u32 / levels;
+        let source = layout.mips.get(mip as usize)?;
+        for y in 0..source.height {
+            for x in 0..source.width {
+                let offset = layout.offset(mip, x, y, slice).ok()?;
+                let address = (memory as usize).checked_add(usize::try_from(offset).ok()?)?;
+                let page = address & !4095;
+                if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(page) {
+                    let mut bytes = Box::new([0; 4096]);
+                    if !crate::host::read_into(page as *const u8, bytes.as_mut_slice()) {
+                        return None;
+                    }
+                    entry.insert(bytes);
+                }
+                let bytes = pages
+                    .get(&page)?
+                    .get(address - page..(address - page).checked_add(element)?)?;
+                let to = usize::try_from(footprint.Offset)
+                    .ok()?
+                    .checked_add(y as usize * footprint.Footprint.RowPitch as usize)?
+                    .checked_add(x as usize * element)?;
+                pixels
+                    .get_mut(to..to.checked_add(element)?)?
+                    .copy_from_slice(bytes);
+            }
+        }
+    }
+    Some(pixels)
+}
+
+pub(crate) fn snapshot_tail(
+    desc: &crate::resource::ResourceDesc,
+    memory: *const u8,
+    texture: &ID3D12Resource,
+    first: u32,
+) -> Option<Vec<u8>> {
+    let layout = crate::resource::texture_layout(desc)?.planes[0]
+        .layout
+        .clone();
+    let (native, footprints, _, total) = footprints_of(texture)?;
+    tail_pixels(
+        &layout,
+        memory,
+        first,
+        u32::from(native.MipLevels),
+        &footprints,
+        total,
+    )
+}
+
+pub(crate) fn initialization_footprints(
+    texture: &ID3D12Resource,
+) -> Option<(Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>, u64)> {
+    let (_, footprints, _, total) = footprints_of(texture)?;
+    Some((footprints, total))
+}
+
+pub(crate) fn initialized_hashes(
+    texture: &ID3D12Resource,
+    pixels: &[u8],
+) -> Option<Vec<Option<blake3::Hash>>> {
+    let (footprints, total) = initialization_footprints(texture)?;
+    if pixels.len() as u64 != total {
+        return None;
+    }
+    footprints
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let end = footprints.get(i + 1).map_or(total, |f| f.Offset) as usize;
+            Some(Some(timed_hash(pixels.get(f.Offset as usize..end)?)))
+        })
+        .collect()
+}
+
 fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     use windows::core::Interface;
     // Pin the allocation before taking the staging table, not inside it:
@@ -1138,35 +1295,24 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         once!(?desc, "texture contents in an XOR mode not uploaded");
         return None;
     }
-    let host = host()?;
-    // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
-    let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
-        u32::from(d.MipLevels)
-    } else {
-        u32::from(d.MipLevels) * u32::from(d.DepthOrArraySize)
-    };
-    let mut footprints = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
-    let mut rows = vec![0u32; count as usize];
-    let mut total = 0;
-    // SAFETY: outputs for `count` subresources.
-    unsafe {
-        host.device.GetCopyableFootprints(
-            &d,
-            0,
-            count,
-            0,
-            Some(footprints.as_mut_ptr()),
-            Some(rows.as_mut_ptr()),
-            None,
-            Some(&mut total),
-        );
-    }
+    let (d, footprints, rows, total) = footprints_of(texture)?;
+    let initial = copy
+        .initial_tail
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let dirty = initial.is_some();
+    let hash = copy
+        .tail
+        .then(|| initial.as_ref().map(|p| timed_hash(p)))
+        .flatten();
+    let linear = initial.unwrap_or_default();
     tracing::debug!(?desc, total, "texture contents uploaded from title memory");
     STAGED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    STAGED[1].fetch_add(total, std::sync::atomic::Ordering::Relaxed);
+    STAGED[1].fetch_add(linear.len() as u64, std::sync::atomic::Ordering::Relaxed);
     let s = Arc::new(Staging {
         epoch: copy.epoch,
+        tail: copy.tail,
         demoted: copy.demoted,
         host_key: copy.texture.as_raw() as usize,
         telemetry: copy
@@ -1191,10 +1337,11 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         bytes: total,
         memory,
         last: Mutex::new(Last {
-            linear: vec![0; total as usize],
+            linear,
+            hash,
             ..Last::default()
         }),
-        dirty: std::sync::atomic::AtomicBool::new(true),
+        dirty: std::sync::atomic::AtomicBool::new(dirty),
         used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
     });
     let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());

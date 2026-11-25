@@ -17,6 +17,9 @@ struct Entry {
     resident: bool,
     range: (usize, usize),
     invalidated: bool,
+    target_bytes: u64,
+    promotable: bool,
+    promotion_retry_ms: u64,
 }
 
 static TEXTURES: LazyLock<Mutex<HashMap<usize, Entry>>> = LazyLock::new(Mutex::default);
@@ -87,6 +90,12 @@ pub(crate) fn uploaded(key: usize) {
 }
 
 pub(crate) fn track(texture: &std::sync::Arc<HostTexture>, guest: usize, bytes: u64) {
+    let target = texture
+        .tail
+        .then(|| crate::resource::streaming_target(guest as crate::object::This))
+        .flatten();
+    let target_bytes = target.map_or(bytes, |(_, bytes)| bytes);
+    let promotable = target.is_some_and(|(mip, _)| mip < texture.first_mip);
     let range = crate::resource::texture_memory(guest as crate::object::This)
         .map(|(at, desc)| {
             let len = crate::resource::texture_layout(&desc)
@@ -108,6 +117,9 @@ pub(crate) fn track(texture: &std::sync::Arc<HostTexture>, guest: usize, bytes: 
             resident: true,
             range,
             invalidated: false,
+            target_bytes,
+            promotable,
+            promotion_retry_ms: 0,
         },
     );
 }
@@ -249,6 +261,7 @@ fn legacy_sweep() {
             let entry = &entries[key];
             let last = texture.last_used_frame.load(Relaxed);
             (entry.resident
+                && !texture.tail
                 && cold(last, frame, entry.last_submission, finished)
                 && !crate::texture::host_wrote(entry.guest))
             .then_some((last, *key, texture))
@@ -309,6 +322,7 @@ fn eviction_key(invalidated: bool, last: u64, key: usize) -> (bool, u64, usize) 
 }
 
 pub(crate) fn sweep() {
+    promote_tails();
     static LOG: std::sync::Once = std::sync::Once::new();
     LOG.call_once(||tracing::info!(target:"starport::residency",enabled=enabled(),legacy=legacy(),target_pct=target_pct(),cold_frames=90,
         "streaming residency policy; recorded owners and unfinished submissions remain pinned"));
@@ -354,7 +368,7 @@ pub(crate) fn sweep() {
             let eligible = if entry.invalidated {
                 entry.last_submission <= finished
             } else {
-                pressure && cold(last, frame, entry.last_submission, finished)
+                pressure && !texture.tail && cold(last, frame, entry.last_submission, finished)
             };
             if eligible && std::sync::Arc::strong_count(&texture) == 2 {
                 candidates.push((
@@ -404,6 +418,99 @@ pub(crate) fn sweep() {
         }
         processed += 1;
     }
+}
+
+fn promote_tails() {
+    if !crate::progressive::enabled()
+        || crate::host::started_submission() != crate::host::finished_submission()
+    {
+        return;
+    }
+    // This cap includes sorting, budget queries and unsuccessful attempts, not
+    // only successful copies. The final indivisible initialization may overrun.
+    struct Quota {
+        frame: u64,
+        us: u64,
+        attempts: u64,
+    }
+    static QUOTA: Mutex<Quota> = Mutex::new(Quota {
+        frame: u64::MAX,
+        us: 0,
+        attempts: 0,
+    });
+    let frame = crate::frame::current();
+    let mut quota = QUOTA.lock().unwrap_or_else(|e| e.into_inner());
+    if quota.frame != frame {
+        *quota = Quota {
+            frame,
+            us: 0,
+            attempts: 0,
+        };
+    }
+    if quota.attempts >= 8 || quota.us >= 16000 {
+        return;
+    }
+    let initial_us = quota.us;
+    let measured = std::time::Instant::now();
+    let now = crate::host::now_ms();
+    let candidates = {
+        let entries = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .iter()
+            .filter_map(|(&key, entry)| {
+                if !entry.promotable
+                    || entry.invalidated
+                    || entry.promotion_retry_ms > now
+                    || entry.last_submission > crate::host::finished_submission()
+                {
+                    return None;
+                }
+                // Every upgraded Arc is retained until outside the registry lock:
+                // dropping the last one there could recurse through forget().
+                let texture = entry.texture.upgrade()?;
+                Some((
+                    std::cmp::Reverse(texture.last_used_frame.load(Relaxed)),
+                    entry.target_bytes,
+                    key,
+                    entry.guest,
+                    texture.epoch,
+                    texture,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut candidates = candidates;
+    candidates.sort_unstable_by_key(|c| (c.0, c.1, std::cmp::Reverse(c.4)));
+    for (_, _, key, guest, epoch, texture) in candidates {
+        if quota.attempts >= 8 || initial_us + measured.elapsed().as_micros() as u64 >= 16000 {
+            break;
+        }
+        let Some(bytes) = crate::resource::promotion_bytes(guest, key, epoch) else {
+            continue;
+        };
+        let room = crate::host::host()
+            .and_then(|h| h.video_memory())
+            .is_some_and(|[budget, used, ..]| {
+                budget > 0 && used.saturating_add(bytes) <= budget / 100 * target_pct()
+            });
+        if !room {
+            continue;
+        }
+        if let Some(entry) = TEXTURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&key)
+        {
+            entry.promotion_retry_ms = now + 2000;
+        }
+        drop(texture);
+        quota.attempts += 1;
+        if let Some(patch) = crate::descriptor::host::patch_for_promotion(key, frame) {
+            crate::resource::promote_tail(guest, key, epoch);
+            drop(patch);
+        }
+    }
+    quota.us = initial_us + measured.elapsed().as_micros() as u64;
 }
 
 pub(crate) fn counters() -> [u64; 3] {

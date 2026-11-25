@@ -20,6 +20,7 @@ mod allocstat;
 mod ambient;
 mod ambient_trace;
 mod perf;
+mod progressive;
 pub use perf::hotkey as bench_hotkey;
 #[cfg(windows)]
 mod binding_trace;

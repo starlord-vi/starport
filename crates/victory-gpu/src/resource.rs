@@ -1138,6 +1138,8 @@ struct Resource {
 pub(crate) struct HostTexture {
     pub(crate) epoch: u64,
     pub(crate) demoted: bool,
+    pub(crate) tail: bool,
+    pub(crate) initial_tail: std::sync::Mutex<Option<Vec<u8>>>,
     pub(crate) upload_hashes: std::sync::Arc<std::sync::Mutex<Vec<Option<blake3::Hash>>>>,
     pub(crate) upload_telemetry: std::sync::OnceLock<std::sync::Arc<crate::telemetry::Resource>>,
     /// Source mip represented by host mip zero (CPU-streamed views only).
@@ -1183,6 +1185,8 @@ struct Hosted {
     gone: std::sync::atomic::AtomicBool,
     /// A texture of [`PLACED_TEXTURES`].
     placed: std::sync::atomic::AtomicBool,
+    promoted: std::sync::atomic::AtomicBool,
+    effective_mip: std::sync::atomic::AtomicU32,
 }
 
 /// Counts for the memory line: host copies of textures the title fills
@@ -1335,7 +1339,12 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             .clear
             .as_ref()
             .map_or(std::ptr::null(), |c| std::ptr::from_ref(c).cast::<c_void>());
-        let first_mip = streaming_first_mip(&r.desc, r.host.placed.load(Relaxed));
+        let target = streaming_first_mip(&r.desc, r.host.placed.load(Relaxed));
+        let progressive = (!r.host.promoted.load(Relaxed))
+            .then(|| progressive_first_mip(&r.desc, r.host.placed.load(Relaxed), target))
+            .flatten();
+        let first_mip = progressive.unwrap_or(target);
+        let tail = progressive.is_some();
         let mut host_desc = r.desc;
         if first_mip != 0 {
             host_desc.width = (host_desc.width >> first_mip).max(1);
@@ -1343,9 +1352,33 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             // Zero requests a full chain of the (now smaller) dimensions.
             host_desc.mip_levels = host_desc.mip_levels.saturating_sub(first_mip as u16);
         }
+        // Reserve queried native allocation bytes before allocating, so a full
+        // tail budget does not create/release thousands of doomed resources.
+        let tail_lease = if tail {
+            Some(crate::progressive::reserve(bc_allocation_bytes(
+                &host_desc,
+            )?)?)
+        } else {
+            None
+        };
         let Some(texture) = host_texture(&host_desc, r.host.state, clear) else {
-            r.host.refused.store(true, Relaxed);
+            if !tail {
+                r.host.refused.store(true, Relaxed);
+            }
             return None;
+        };
+        let initial_tail = if tail {
+            let lease = tail_lease?;
+            let Some(pixels) =
+                crate::texture::snapshot_tail(&r.desc, r.data().cast_const(), &texture, first_mip)
+            else {
+                crate::progressive::unavailable();
+                return None;
+            };
+            crate::allocstat::tail(&texture, lease).ok()?;
+            Some(pixels)
+        } else {
+            None
         };
         let twin = twin_texture(&r.desc, &texture);
         // One line per depth texture with unordered access: its address is
@@ -1363,6 +1396,12 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         let mut host = HostTexture::new(texture, state);
         host.demoted = r.host.gone.load(Relaxed);
         host.first_mip = first_mip;
+        host.tail = tail;
+        *host
+            .initial_tail
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = initial_tail;
+        r.host.effective_mip.store(first_mip, Relaxed);
         host.filled = fills(&r.desc);
         if host.filled {
             KINDS[0].fetch_add(1, Relaxed);
@@ -1491,6 +1530,8 @@ pub(crate) fn let_go_idle() {
         };
         if let Some((host, _)) = gone {
             r.host.gone.store(true, Relaxed);
+            r.host.promoted.store(false, Relaxed);
+            r.host.effective_mip.store(u32::MAX, Relaxed);
             KINDS[2].fetch_add(1, Relaxed);
             KINDS[3].fetch_add(host.bytes, Relaxed);
             went += 1;
@@ -1547,11 +1588,157 @@ pub(crate) fn reclaim_streaming(guest: usize, key: usize, epoch: u64) -> bool {
         return false;
     };
     r.host.gone.store(true, Relaxed);
+    r.host.promoted.store(false, Relaxed);
+    r.host.effective_mip.store(u32::MAX, Relaxed);
     KINDS[2].fetch_add(1, Relaxed);
     KINDS[3].fetch_add(host.bytes, Relaxed);
     drop(made);
     drop(all);
     drop(host);
+    true
+}
+
+/// Native byte estimate for eligible BC resources (no target/twin conversions).
+#[cfg(windows)]
+fn bc_allocation_bytes(desc: &ResourceDesc) -> Option<u64> {
+    let _timer = crate::perf::time(crate::perf::Part::StagingAlloc);
+    let host = crate::host::host()?;
+    let mut native = *desc;
+    native.format = pc_format(native.format);
+    native.layout = 0;
+    native.alignment = 0;
+    native.flags &= 0xf;
+    // SAFETY: checked shared layout, also used by host_texture.
+    let native = unsafe {
+        (&raw const native)
+            .cast::<windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC>()
+            .read()
+    };
+    let bytes = unsafe { host.device.GetResourceAllocationInfo(0, &[native]) }.SizeInBytes;
+    (bytes != u64::MAX).then_some(bytes)
+}
+
+/// Called while the caller owns/pins this title resource (initial admission).
+#[cfg(windows)]
+pub(crate) fn streaming_target(this: This) -> Option<(u32, u64)> {
+    let r = resource(this);
+    let target = streaming_first_mip(
+        &r.desc,
+        r.host.placed.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    bc_allocation_bytes(&rebased(&r.desc, target)).map(|bytes| (target, bytes))
+}
+
+#[cfg(windows)]
+fn rebased(desc: &ResourceDesc, first: u32) -> ResourceDesc {
+    let mut desc = *desc;
+    desc.width = (desc.width >> first).max(1);
+    desc.height = (desc.height >> first).max(1);
+    desc.mip_levels = desc.mip_levels.saturating_sub(first as u16);
+    desc
+}
+
+#[cfg(windows)]
+pub(crate) fn promotion_bytes(guest: usize, key: usize, epoch: u64) -> Option<u64> {
+    use windows::core::Interface;
+    let all = textures();
+    if !all.contains(&guest) {
+        return None;
+    }
+    // SAFETY: title resources leave this table before destruction.
+    let r = unsafe { &*(guest as *const Resource) };
+    let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    let (old, _) = made.as_ref()?;
+    let target = streaming_first_mip(
+        &r.desc,
+        r.host.placed.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    if !old.tail
+        || old.epoch != epoch
+        || old.texture.as_raw() as usize != key
+        || target >= old.first_mip
+    {
+        return None;
+    }
+    bc_allocation_bytes(&rebased(&r.desc, target))
+}
+
+/// Called with all submissions complete, static descriptors temporarily
+/// unmade, and no recorded-list/native/CPU leases. Failure preserves the tail.
+#[cfg(windows)]
+pub(crate) fn promote_tail(guest: usize, key: usize, epoch: u64) -> bool {
+    use std::sync::{Arc, atomic::Ordering::Relaxed};
+    use windows::core::Interface;
+    if crate::host::started_submission() != crate::host::finished_submission() {
+        return false;
+    }
+    let all = textures();
+    if !all.contains(&guest) {
+        return false;
+    }
+    // SAFETY: table lock pins the title resource, made mutex serializes leases.
+    let r = unsafe { &*(guest as *const Resource) };
+    let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((old, twin)) = made.as_ref() else {
+        return false;
+    };
+    if !old.tail
+        || old.epoch != epoch
+        || old.texture.as_raw() as usize != key
+        || twin.is_some()
+        || Arc::strong_count(old) != 1
+        || crate::host::references(&old.texture) != 1
+        || r.host.state != 0
+    {
+        return false;
+    }
+    let target = streaming_first_mip(&r.desc, true);
+    if target >= old.first_mip {
+        return false;
+    }
+    let Some(native) = host_texture(&rebased(&r.desc, target), 0, std::ptr::null()) else {
+        return false;
+    };
+    let Some(pixels) =
+        crate::texture::snapshot_tail(&r.desc, r.data().cast_const(), &native, target)
+    else {
+        return false;
+    };
+    let Some(hashes) = crate::texture::initialized_hashes(&native, &pixels) else {
+        return false;
+    };
+    if let Err(error) = crate::progressive::initialize(&native, &pixels) {
+        tracing::warn!(%error,guest,"full promotion initialization failed; retaining real tail");
+        return false;
+    }
+    let mut next = HostTexture::new(native, crate::host::texture_state(0));
+    next.first_mip = target;
+    next.filled = true;
+    *next.upload_hashes.lock().unwrap_or_else(|e| e.into_inner()) = hashes;
+    let d = unsafe { next.texture.GetDesc() };
+    let counter = Arc::new(crate::telemetry::Resource::new(crate::telemetry::Shape {
+        guest: guest as u64,
+        width: d.Width,
+        height: d.Height,
+        layers: d.DepthOrArraySize,
+        format: d.Format.0 as u32,
+        kind: "texture",
+    }));
+    counter.upload(0, pixels.len() as u64, crate::telemetry::Reason::Promotion);
+    let _ = next.upload_telemetry.set(counter);
+    KINDS[0].fetch_add(1, Relaxed);
+    KINDS[1].fetch_add(next.bytes, Relaxed);
+    KINDS[6].fetch_add(1, Relaxed);
+    let next = Arc::new(next);
+    crate::residency::track(&next, guest, next.bytes);
+    let previous = made.replace((next, None));
+    r.host.promoted.store(true, Relaxed);
+    r.host.effective_mip.store(target, Relaxed);
+    crate::descriptor::texture_made(guest);
+    drop(made);
+    drop(all);
+    drop(previous);
+    crate::progressive::promoted();
     true
 }
 
@@ -1656,6 +1843,8 @@ impl HostTexture {
             upload_hashes: std::sync::Arc::default(),
             upload_telemetry: std::sync::OnceLock::new(),
             demoted: false,
+            tail: false,
+            initial_tail: std::sync::Mutex::new(None),
             epoch: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
                 NEXT.fetch_add(1, Relaxed)
@@ -1724,6 +1913,26 @@ fn streaming_mips(desc: &ResourceDesc, placed: bool, count: u32, minimum: u64) -
     }
 }
 
+#[cfg(windows)]
+fn progressive_first_mip(desc: &ResourceDesc, placed: bool, target: u32) -> Option<u32> {
+    if !crate::progressive::enabled()
+        || !placed
+        || !fills(desc)
+        || desc.dimension != 3
+        || desc.sample_count != 1
+        || !matches!(pc_format(desc.format),70..=84|94..=99)
+    {
+        return None;
+    }
+    crate::progressive::tail_mip(desc.width, desc.height, mip_count(desc), target)
+}
+#[cfg(windows)]
+pub(crate) fn progressive_words(words: &[u32; 14]) -> bool {
+    // SAFETY: same 56-byte guest description layout.
+    let desc = unsafe { words.as_ptr().cast::<ResourceDesc>().read_unaligned() };
+    progressive_first_mip(&desc, true, streaming_first_mip(&desc, true)).is_some()
+}
+
 #[cfg(all(windows, test))]
 fn skip_streaming_mip(desc: &ResourceDesc, placed: bool, on: bool) -> bool {
     streaming_mips(desc, placed, u32::from(on), 2048) > 0
@@ -1731,7 +1940,24 @@ fn skip_streaming_mip(desc: &ResourceDesc, placed: bool, on: bool) -> bool {
 
 #[cfg(windows)]
 pub(crate) fn host_first_mip(this: This) -> u32 {
-    hosted(this, false).map_or(0, |(host, _)| host.first_mip)
+    if this.is_null() {
+        return 0;
+    }
+    let r = resource(this);
+    let effective = r
+        .host
+        .effective_mip
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if effective != u32::MAX {
+        return effective;
+    }
+    let placed = r.host.placed.load(std::sync::atomic::Ordering::Relaxed);
+    let target = streaming_first_mip(&r.desc, placed);
+    if r.host.promoted.load(std::sync::atomic::Ordering::Relaxed) {
+        target
+    } else {
+        progressive_first_mip(&r.desc, placed, target).unwrap_or(target)
+    }
 }
 
 /// Descriptor size fields, from the view's actual shape. Unlike an assumed
@@ -1741,10 +1967,19 @@ pub(crate) fn texture_view_words(
     words: &[u32; 14],
     view: Option<&[u32; 10]>,
     placed: bool,
+    address: u64,
 ) -> Option<[u32; 4]> {
     // SAFETY: resource descriptions are fourteen plain words.
     let desc = unsafe { words.as_ptr().cast::<ResourceDesc>().read_unaligned() };
-    texture_size_words(&desc, view, streaming_first_mip(&desc, placed))
+    let map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    let first = map
+        .get(&(address, *words))
+        .map(|&this| host_first_mip(this as This))
+        .unwrap_or_else(|| {
+            let target = streaming_first_mip(&desc, placed);
+            progressive_first_mip(&desc, placed, target).unwrap_or(target)
+        });
+    texture_size_words(&desc, view, first)
 }
 
 #[cfg(windows)]
@@ -1753,14 +1988,7 @@ pub(crate) fn object_view_words(this: This, view: Option<&[u32; 10]>) -> Option<
         return None;
     }
     let r = resource(this);
-    texture_size_words(
-        &r.desc,
-        view,
-        streaming_first_mip(
-            &r.desc,
-            r.host.placed.load(std::sync::atomic::Ordering::Relaxed),
-        ),
-    )
+    texture_size_words(&r.desc, view, host_first_mip(this))
 }
 
 #[cfg(windows)]
@@ -2048,6 +2276,8 @@ fn hand_out_resource(
             refused: std::sync::atomic::AtomicBool::new(false),
             gone: std::sync::atomic::AtomicBool::new(false),
             placed: std::sync::atomic::AtomicBool::new(false),
+            promoted: std::sync::atomic::AtomicBool::new(false),
+            effective_mip: std::sync::atomic::AtomicU32::new(u32::MAX),
         },
     });
     // The host copy waits for the texture's first use ([`Hosted`]).
@@ -2555,6 +2785,212 @@ mod tests {
             layout: 0,
             ..buffer(0)
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_tail_survives_missing_large_mips_and_promotion_is_transactional() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::core::Interface;
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        struct Fixture {
+            at: usize,
+            image: This,
+            heap: This,
+            words: [u32; 14],
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if !self.heap.is_null() {
+                    slot::<Release>(self.heap, 0x10)(self.heap);
+                }
+                PLACED_TEXTURES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&(self.at as u64, self.words));
+                if !self.image.is_null() {
+                    crate::texture::unstage(self.image);
+                    slot::<Release>(self.image, 0x10)(self.image);
+                }
+                crate::watch::title_memory_remapped(self.at, 64 << 10);
+                unsafe { VirtualFree(self.at as _, 0, MEM_RELEASE) };
+            }
+        }
+        let before = crate::progressive::counters();
+        {
+            let h = crate::host::host().unwrap();
+            let desc = texture(4096, 4096, 71, 13);
+            let size = texture_layout(&desc).unwrap().planes[0].layout.size as usize;
+            let at = unsafe { VirtualAlloc(std::ptr::null(), size, MEM_RESERVE, PAGE_READWRITE) }
+                as usize;
+            assert_ne!(at, 0);
+            let words = unsafe { (&raw const desc).cast::<[u32; 14]>().read() };
+            let mut fixture = Fixture {
+                at,
+                image: std::ptr::null(),
+                heap: std::ptr::null(),
+                words,
+            };
+            assert_eq!(
+                unsafe { VirtualAlloc(at as _, 64 << 10, MEM_COMMIT, PAGE_READWRITE) } as usize,
+                at
+            );
+            unsafe { std::ptr::write_bytes(at as *mut u8, 0x5a, 64 << 10) };
+            let image = texture_at(at as u64, &words).unwrap();
+            fixture.image = image;
+            let tail =
+                host_resource(image).expect("mapped small mips must not need large source pages");
+            assert!(tail.tail);
+            assert_eq!(tail.first_mip, 9);
+            assert_eq!(unsafe { tail.texture.GetDesc() }.Width, 8);
+            let key = tail.texture.as_raw() as usize;
+            let epoch = tail.epoch;
+            let upload = crate::texture::snapshot_for_test(image, &tail.texture).unwrap();
+            assert!(upload.bytes < 65536);
+            assert_eq!(crate::texture::cpu_staging_bytes(image), 0);
+            let list = h.new_list().unwrap();
+            unsafe {
+                list.list.ResourceBarrier(&[crate::host::transition(
+                    &tail.texture,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                )])
+            };
+            upload.record(&list.list, &tail.texture);
+            unsafe {
+                list.list.ResourceBarrier(&[crate::host::transition(
+                    &tail.texture,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COMMON,
+                )])
+            };
+            list.close();
+            h.execute(&[&list]);
+            list.reset();
+            list.close();
+            crate::texture::unstage(image);
+            let title_heap = crate::descriptor::test_view_heap(4);
+            fixture.heap = title_heap;
+            let heap = crate::descriptor::heap(title_heap);
+            let mut view = [0; 10];
+            view[0] = 71;
+            view[1] = 4;
+            view[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view[5] = 13;
+            crate::descriptor::create_srv(std::ptr::null(), image, &view, heap.start);
+            let host_heap = heap.host().unwrap();
+            let native_lease = tail.texture.clone();
+            drop(tail);
+            crate::host::idle_for_test(|| {
+                let patch = crate::descriptor::host::patch_for_promotion(key, 0).unwrap();
+                assert!(
+                    !promote_tail(image as usize, key, epoch),
+                    "a native lease pins the real tail"
+                );
+                drop(patch);
+                assert!(
+                    host_heap.resident_resources().contains(&key),
+                    "refused promotion restores the real descriptor"
+                );
+            });
+            drop(native_lease);
+            crate::host::idle_for_test(|| {
+                let patch = crate::descriptor::host::patch_for_promotion(key, 0).unwrap();
+                assert!(
+                    !promote_tail(image as usize, key, epoch),
+                    "unmapped target mips cannot be invented"
+                );
+                drop(patch);
+                assert!(host_heap.resident_resources().contains(&key));
+            });
+            assert_eq!(
+                unsafe { VirtualAlloc(at as _, size, MEM_COMMIT, PAGE_READWRITE) } as usize,
+                at
+            );
+            unsafe { std::ptr::write_bytes(at as *mut u8, 0x3c, size) };
+            crate::host::idle_for_test(|| {
+                let patch = crate::descriptor::host::patch_for_promotion(key, 0).unwrap();
+                assert!(promote_tail(image as usize, key, epoch));
+                drop(patch);
+            });
+            let full = host_resource(image).unwrap();
+            assert!(!full.tail);
+            assert_eq!(full.first_mip, 2);
+            let d = unsafe { full.texture.GetDesc() };
+            assert_eq!(d.Width, 1024);
+            assert!(!host_heap.resident_resources().contains(&key));
+            assert!(
+                host_heap
+                    .resident_resources()
+                    .contains(&(full.texture.as_raw() as usize))
+            );
+            let metadata = object_view_words(image, None).unwrap();
+            assert_eq!(
+                (metadata[0] >> 30 | (metadata[1] & 0x3fff) << 2) + 1,
+                d.Width as u32
+            );
+            let read = h.read_back_buffer(2048 * 256).unwrap();
+            let back = h.new_list().unwrap();
+            unsafe {
+                back.list.ResourceBarrier(&[crate::host::transition(
+                    &full.texture,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                )]);
+                let from = D3D12_TEXTURE_COPY_LOCATION {
+                    pResource: std::mem::transmute_copy(&full.texture),
+                    Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                    Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                        SubresourceIndex: 0,
+                    },
+                };
+                let to = D3D12_TEXTURE_COPY_LOCATION {
+                    pResource: std::mem::transmute_copy(&read),
+                    Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                    Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                        PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                            Offset: 0,
+                            Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                                Format: d.Format,
+                                Width: 1024,
+                                Height: 1024,
+                                Depth: 1,
+                                RowPitch: 2048,
+                            },
+                        },
+                    },
+                };
+                back.list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+                back.list.ResourceBarrier(&[crate::host::transition(
+                    &full.texture,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                )]);
+            }
+            back.close();
+            h.execute(&[&back]);
+            let mut mapped = std::ptr::null_mut();
+            unsafe {
+                read.Map(0, None, Some(&mut mapped)).unwrap();
+                let bytes = std::slice::from_raw_parts(mapped.cast::<u8>(), 2048 * 256);
+                assert_eq!(&bytes[..8], &[0x3c; 8]);
+                assert_eq!(&bytes[2048 * 255..2048 * 255 + 8], &[0x3c; 8]);
+                read.Unmap(0, None);
+            }
+            assert!(
+                crate::texture::snapshot_for_test(image, &full.texture).is_none(),
+                "private initialization hashes suppress a duplicate full upload"
+            );
+            back.reset();
+            back.close();
+        }
+        assert_eq!(
+            crate::progressive::counters()[0],
+            before[0],
+            "native tail lease releases its budget"
+        );
     }
 
     #[cfg(windows)]

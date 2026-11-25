@@ -183,14 +183,14 @@ pub(crate) struct State {
     /// Graphics, compute.
     host_roots: [usize; 2],
     host_heaps: [usize; 2],
-    /// Tables made afresh in this list: (table, slot count, contents) → first
+    /// Tables made afresh in this list: (table, slot count, contents) â†’ first
     /// dynamic slot.
     fresh_tables: std::collections::HashMap<(u64, u32, u64), u32>,
     /// The dynamic slots the list holds: title heap, first, count; given
     /// back when the list has run, is reset or released.
     dynamic: Vec<(usize, u32, u32)>,
     /// Root SRVs bound as one-view tables in this list: (title heap, title
-    /// address; 0 for none) → dynamic slot, and the host copy the slot
+    /// address; 0 for none) â†’ dynamic slot, and the host copy the slot
     /// shows: later draws of the list bring that one up to date, whatever
     /// copy the address would find by then (`shadow.rs` `tails`).
     root_srv_slots: std::collections::HashMap<(usize, u64), RootSlot>,
@@ -1766,7 +1766,10 @@ impl State {
             }
             // From here on a host texture is made: not without room. The
             // slot stays due.
-            if !room {
+            let tail_admission = crate::progressive::enabled() && heap.handle(index)
+                .and_then(crate::descriptor::view)
+                .is_some_and(|view| matches!(view, View::Placed(false, words, _) if crate::resource::progressive_words(&words)));
+            if !room && !tail_admission {
                 refused += 1;
                 if refused > 256 {
                     break;
@@ -1786,8 +1789,13 @@ impl State {
                     continue;
                 }
             };
-            let title_fills = crate::resource::host_resource(resource)
-                .is_some_and(|t| crate::texture::title_written(&t.texture));
+            let Some(texture) = crate::resource::host_resource(resource) else {
+                // A missing source tail or exhausted tail budget must be retried,
+                // not mistaken for a GPU-written target and removed forever.
+                host.texture_slot_later(index, write, frame, 1);
+                continue;
+            };
+            let title_fills = crate::texture::title_written(&texture.texture);
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);

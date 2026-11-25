@@ -17,6 +17,7 @@ pub(crate) enum Reason {
     DirtyReupload,
     MipRebase,
     DemotionReupload,
+    Promotion,
 }
 
 impl Reason {
@@ -35,6 +36,7 @@ impl Reason {
             Self::DirtyReupload => "dirty-reupload",
             Self::MipRebase => "mip-rebase",
             Self::DemotionReupload => "demotion-reupload",
+            Self::Promotion => "promotion",
         }
     }
 }
@@ -132,7 +134,7 @@ fn cover(ranges: &mut Vec<(u64, u64)>, from: u64, to: u64) -> u64 {
 #[derive(Default)]
 struct Frame {
     resources: BTreeMap<(bool, u64, &'static str), (Shape, u64)>,
-    reasons: [u64; 4],
+    reasons: [u64; 5],
     overflow_bytes: u64,
     refused: BTreeMap<(String, bool), u64>,
     ambient_hits: u64,
@@ -219,6 +221,7 @@ pub(crate) fn present(flights: usize, pending_frames: usize) {
         cumulative_upload_bytes=total, cumulative_unique_allocation_bytes=unique,
         cumulative_repeat_bytes=total.saturating_sub(unique), first_upload_bytes=frame.reasons[0],
         dirty_reupload_bytes=frame.reasons[1], mip_rebase_bytes=frame.reasons[2], demotion_reupload_bytes=frame.reasons[3],
+        promotion_upload_bytes=frame.reasons[4],
         overflow_attribution_bytes=frame.overflow_bytes, ambient_hits=frame.ambient_hits,
         live_texture_bytes=crate::resource::HOST_TEXTURES[1].load(Relaxed),
         waiting_texture_slots=crate::draw::HEAP_TEXTURES_WAITING.load(Relaxed),
@@ -230,6 +233,8 @@ pub(crate) fn present(flights: usize, pending_frames: usize) {
         eviction_patched_descriptors=crate::residency::details()[0],
         eviction_pinned_candidates=crate::residency::details()[1],
         overwrite_invalidations=crate::residency::details()[2],
+        tail_bytes=crate::progressive::counters()[0], tail_allocations=crate::progressive::counters()[1],
+        promoted_textures=crate::progressive::counters()[2], unavailable_tail_attempts=crate::progressive::counters()[3],
         "sampled presented-frame attribution; phases are CPU wall times, recording may precede submission");
     for back in [false, true] {
         let mut resources: Vec<_> = frame

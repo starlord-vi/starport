@@ -19,6 +19,7 @@ pub(crate) enum Class {
 static LIVE: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 static HISTOGRAM: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 const TAG: GUID = GUID::from_u128(0xece62a50_55ba_4f40_970d_d29db2971132);
+const TAIL_TAG: GUID = GUID::from_u128(0x08d082ec_24c2_4fb6_b707_d36b0a6dafb1);
 
 fn bucket(dimension: u64, bc: bool) -> usize {
     let size = match dimension {
@@ -41,6 +42,7 @@ struct Token {
     class: Class,
     bytes: u64,
     bucket: Option<usize>,
+    _tail: Option<crate::progressive::TailLease>,
 }
 impl Drop for Token {
     fn drop(&mut self) {
@@ -109,6 +111,7 @@ fn attach(object: &ID3D12Object, class: Class, bytes: u64, bucket: Option<usize>
         class,
         bytes,
         bucket,
+        _tail: None,
     });
     // SAFETY: standard IUnknown layout and reference ownership. The D3D12
     // object AddRefs it, then drops it on final destruction/replacement.
@@ -151,6 +154,25 @@ pub(crate) fn resource(device: &ID3D12Device, resource: &ID3D12Resource, class: 
     if let Ok(object) = resource.cast() {
         attach(&object, class, bytes, histogram);
     }
+}
+
+/// A separate token reserves the tail budget even with diagnostics disabled.
+/// Native clones keep it alive after the HostTexture's last Arc is gone.
+pub(crate) fn tail(
+    resource: &ID3D12Resource,
+    lease: crate::progressive::TailLease,
+) -> windows::core::Result<()> {
+    let token = Box::new(Token {
+        vtable: &VTABLE,
+        refs: AtomicU32::new(1),
+        class: Class::Texture,
+        bytes: 0,
+        bucket: None,
+        _tail: Some(lease),
+    });
+    // SAFETY: same IUnknown layout/ownership as allocation accounting above.
+    let token = unsafe { IUnknown::from_raw(Box::into_raw(token).cast()) };
+    unsafe { resource.SetPrivateDataInterface(&TAIL_TAG, &token) }
 }
 pub(crate) fn descriptors(device: &ID3D12Device, heap: &ID3D12DescriptorHeap) {
     if !crate::perf::collecting() {
