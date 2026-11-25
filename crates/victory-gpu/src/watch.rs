@@ -41,7 +41,7 @@ pub(crate) fn dirty_tracking() -> bool {
 struct Journal {
     /// Numbers the askings; 0 is "never".
     asked: u64,
-    /// Page number → the asking that last found it written.
+    /// Page number â†’ the asking that last found it written.
     written: BTreeMap<usize, u64>,
     /// Room for the kernel's answer.
     found: Vec<usize>,
@@ -268,6 +268,7 @@ fn ask_kernel(j: &mut Journal, first: usize, last: usize) -> bool {
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     // SAFETY: the answer buffer holds `count` entries.
+    let query_timer = crate::perf::time(crate::perf::Part::WriteWatch);
     let failed = unsafe {
         GetWriteWatch(
             WRITE_WATCH_FLAG_RESET,
@@ -278,6 +279,7 @@ fn ask_kernel(j: &mut Journal, first: usize, last: usize) -> bool {
             &mut granularity,
         )
     } != 0;
+    drop(query_timer);
     if failed {
         return false;
     }
@@ -348,6 +350,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     // SAFETY: the answer buffer holds `count` entries.
+    let query_timer = crate::perf::time(crate::perf::Part::WriteWatch);
     let failed = unsafe {
         GetWriteWatch(
             WRITE_WATCH_FLAG_RESET,
@@ -358,6 +361,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
             &mut granularity,
         )
     } != 0;
+    drop(query_timer);
     let guarded = if failed {
         count = 0;
         if !guarded {

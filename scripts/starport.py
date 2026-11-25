@@ -150,6 +150,7 @@ def main():
         'VICTORY_LOG': 'info',
         'STARPORT_RECORD': '1',
         'STARPORT_TELEMETRY': os.environ.get('STARPORT_TELEMETRY', '1'),
+        'STARPORT_BENCH_OUT': os.environ.get('STARPORT_BENCH_OUT', str(run/'bench.json')),
         'STARPORT_FALLBACK_COLOR': os.environ.get('STARPORT_FALLBACK_COLOR', 'black'),
         'STARPORT_MAX_RES': os.environ.get('STARPORT_MAX_RES', ''),
         'STARPORT_SERIES_S': '1' if args.console == 'series-s' else '0',
@@ -169,7 +170,8 @@ def main():
     for name in ('STARPORT_RESIDENCY', 'STARPORT_LEGACY_RESIDENCY', 'STARPORT_VRAM_TARGET_PCT',
                  'STARPORT_DIRTY_TRACKING', 'STARPORT_REBAR_UPLOAD', 'STARPORT_FRAMES_IN_FLIGHT', 'STARPORT_WATCHDOG',
                  'STARPORT_WATCHDOG_SECONDS', 'STARPORT_WATCHDOG_STACKS', 'STARPORT_MEM_BUDGET_MB',
-                 'STARPORT_WAVE64_TRACE', 'STARPORT_AMBIENT_TRACE'):
+                 'STARPORT_WAVE64_TRACE', 'STARPORT_AMBIENT_TRACE', 'STARPORT_SUBPHASES',
+                 'STARPORT_MEMORY_EVERY_N', 'STARPORT_BENCH'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':

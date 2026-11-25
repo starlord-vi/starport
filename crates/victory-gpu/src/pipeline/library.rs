@@ -572,7 +572,7 @@ pub(crate) fn pipeline(
     let wide = HSTRING::from(name);
     let Some(library) = library() else {
         MADE.fetch_add(1, Ordering::Relaxed);
-        return create();
+        return create().inspect(crate::allocstat::pipeline);
     };
     let began = std::time::Instant::now();
     let loaded = {
@@ -594,6 +594,7 @@ pub(crate) fn pipeline(
                     began.elapsed().as_secs_f64() * 1e3
                 )
             });
+            crate::allocstat::pipeline(&pso);
             return Ok(pso);
         }
         Err(e) => e,
@@ -601,7 +602,7 @@ pub(crate) fn pipeline(
     // Compiled outside any lock: compiles take up to seconds.
     let pso = {
         let _call = call("make", name);
-        create()?
+        create().inspect(crate::allocstat::pipeline)?
     };
     MADE.fetch_add(1, Ordering::Relaxed);
     crate::host::trail(|| {

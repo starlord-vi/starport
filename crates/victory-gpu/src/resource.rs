@@ -1647,6 +1647,9 @@ impl HostTexture {
     ) -> HostTexture {
         use std::sync::atomic::Ordering::Relaxed;
         let bytes = host_bytes(&texture);
+        if let Some(host) = crate::host::host() {
+            crate::allocstat::resource(&host.device, &texture, None);
+        }
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
         HOST_TEXTURES[1].fetch_add(bytes, Relaxed);
         HostTexture {

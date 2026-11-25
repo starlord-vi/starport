@@ -1254,6 +1254,7 @@ fn copy_jobs(copies: Vec<(usize, usize, usize)>) -> Vec<Job> {
 /// not yet done), the 64 KiB pieces that differ from the snapshot, as
 /// [`Shadow::copy_back_with`] takes them; found on several threads.
 pub(crate) fn find_all(work: &[(Arc<Shadow>, usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+    let _timer = crate::perf::time(crate::perf::Part::MergeScan);
     let scans = work
         .iter()
         .map(|(shadow, address, end)| {
@@ -2152,6 +2153,7 @@ impl Shadow {
         len: usize,
         found: Option<Vec<(usize, usize)>>,
     ) -> usize {
+        let _timer = crate::perf::time(crate::perf::Part::MergeScan);
         if self.place.is_some() {
             return 0;
         }
@@ -2285,6 +2287,7 @@ impl Shadow {
         now: &mut Vec<u8>,
         title: &mut Vec<u8>,
     ) -> usize {
+        let _timer = crate::perf::time(crate::perf::Part::MergeScan);
         let start = self.start as usize;
         if self.card.is_some() || n == 0 || at + n > self.len as usize {
             return 0;
@@ -2866,6 +2869,7 @@ impl Shadow {
     /// sends it up before the next submission. `title` is scratch memory.
     /// Returns the bytes written to title memory.
     pub(crate) fn card_merge(&self, at: usize, gpu: &[u8], title: &mut Vec<u8>) -> usize {
+        let _timer = crate::perf::time(crate::perf::Part::MergeScan);
         self.telemetry
             .readback(gpu.len() as u64, "gpu-dirty-piece-merge");
         let start = self.start as usize;
@@ -2935,6 +2939,7 @@ impl Shadow {
         fetched_after: u64,
         title: &mut Vec<u8>,
     ) -> usize {
+        let _timer = crate::perf::time(crate::perf::Part::MergeScan);
         self.telemetry
             .readback(gpu.len() as u64, "gpu-dirty-piece-merge");
         let start = self.start as usize;

@@ -741,6 +741,7 @@ impl HostHeap {
                 return None;
             }
         };
+        crate::allocstat::descriptors(&host.device, &heap);
         // SAFETY: a live heap.
         let (cpu, step) = unsafe {
             (

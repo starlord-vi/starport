@@ -175,6 +175,15 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == wm::WM_KILLFOCUS {
+        victory_gpu::bench_hotkey(false);
+    }
+    if wparam == 0x77
+        && matches!(message, wm::WM_KEYDOWN | wm::WM_KEYUP)
+        && victory_gpu::bench_hotkey(message == wm::WM_KEYDOWN)
+    {
+        return 0;
+    }
     super::gameinput::key_event(message, wparam);
     if super::gameinput::mouse::message(hwnd, message, wparam, lparam) {
         return 1;

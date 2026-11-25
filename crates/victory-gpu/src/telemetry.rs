@@ -169,6 +169,7 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
 static PHASES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 pub(crate) fn phase(which: usize, us: u64) {
+    crate::perf::phase(which, us);
     if enabled() {
         PHASES[which].fetch_add(us, Relaxed);
     }
@@ -198,6 +199,7 @@ pub(crate) fn ambient(hit: bool) {
 
 pub(crate) fn present(flights: usize, pending_frames: usize) {
     crate::ambient_trace::present();
+    crate::perf::present();
     if !enabled() {
         return;
     }

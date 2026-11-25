@@ -3287,6 +3287,7 @@ impl Host {
             // live buffers, and the ranges lie in them.
             let recorded = unsafe {
                 (|| -> windows::core::Result<()> {
+                    let _timer = crate::perf::time(crate::perf::Part::UploadRecording);
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
                     for (shadow, ranges) in &dirty {
@@ -6146,6 +6147,7 @@ impl Host {
     /// A buffer of `size` bytes the card writes and we read (a read back),
     /// in the state copies into it need.
     pub(crate) fn read_back_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        let _timer = crate::perf::time(crate::perf::Part::StagingAlloc);
         let heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_READBACK,
             ..Default::default()
@@ -6176,7 +6178,15 @@ impl Host {
             )
         };
         match made {
-            Ok(()) => buffer,
+            Ok(()) => {
+                let buffer = buffer?;
+                crate::allocstat::resource(
+                    &self.device,
+                    &buffer,
+                    Some(crate::allocstat::Class::Readback),
+                );
+                Some(buffer)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no read-back buffer");
                 None
@@ -6217,6 +6227,7 @@ impl Host {
         size: u64,
         kind: D3D12_HEAP_TYPE,
     ) -> Option<(ID3D12Resource, *mut u8)> {
+        let _timer = crate::perf::time(crate::perf::Part::StagingAlloc);
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -6255,7 +6266,15 @@ impl Host {
                 })
         };
         match made {
-            Ok(()) => Some((buffer?, data.cast())),
+            Ok(()) => {
+                let buffer = buffer?;
+                crate::allocstat::resource(
+                    &self.device,
+                    &buffer,
+                    Some(crate::allocstat::Class::Upload),
+                );
+                Some((buffer, data.cast()))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no upload buffer");
                 None
@@ -6951,6 +6970,7 @@ impl Host {
     /// memory that shaders write, which upload memory cannot be. Starts in
     /// the common state (buffers move out of it implicitly).
     pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        let _timer = crate::perf::time(crate::perf::Part::StagingAlloc);
         MADE[2].fetch_add(1, Ordering::Relaxed);
         MADE[3].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -6992,7 +7012,15 @@ impl Host {
                 })
         };
         match made {
-            Ok(()) => Some((buffer?, data.cast())),
+            Ok(()) => {
+                let buffer = buffer?;
+                crate::allocstat::resource(
+                    &self.device,
+                    &buffer,
+                    Some(crate::allocstat::Class::Buffer),
+                );
+                Some((buffer, data.cast()))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no shared buffer");
                 None
@@ -7003,6 +7031,7 @@ impl Host {
     /// A device-local buffer shaders may write (unordered access) and indirect
     /// execution may read, starting in the common state.
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        let _timer = crate::perf::time(crate::perf::Part::StagingAlloc);
         MADE[4].fetch_add(1, Ordering::Relaxed);
         MADE[5].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -7036,7 +7065,15 @@ impl Host {
             )
         };
         match made {
-            Ok(()) => buffer,
+            Ok(()) => {
+                let buffer = buffer?;
+                crate::allocstat::resource(
+                    &self.device,
+                    &buffer,
+                    Some(crate::allocstat::Class::Buffer),
+                );
+                Some(buffer)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, size, "no unordered-access buffer");
                 None
@@ -7171,6 +7208,15 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_KILLFOCUS {
+        crate::perf::hotkey(false);
+    }
+    if wparam.0 == 0x77
+        && matches!(message, WM_KEYDOWN | WM_KEYUP)
+        && crate::perf::hotkey(message == WM_KEYDOWN)
+    {
+        return LRESULT(0);
+    }
     // SAFETY: the default handling for our window.
     unsafe {
         let result = DefWindowProcW(hwnd, message, wparam, lparam);

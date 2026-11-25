@@ -15,9 +15,12 @@
 //! share, [`console`] which console model the title sees. Planned:
 //! `present` (swap chain).
 
+mod allocstat;
 #[cfg(windows)]
 mod ambient;
 mod ambient_trace;
+mod perf;
+pub use perf::hotkey as bench_hotkey;
 #[cfg(windows)]
 mod binding_trace;
 #[cfg(all(windows, feature = "diagnostics"))]

@@ -693,6 +693,7 @@ dependencies = [
  "miniz_oxide",
  "tempfile",
  "tracing",
+ "victory-core",
  "victory-formats",
  "victory-pipeline",
  "victory-shader",

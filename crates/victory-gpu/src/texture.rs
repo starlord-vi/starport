@@ -567,6 +567,7 @@ impl Upload {
         self.footprints.iter().map(|f| f.0).collect()
     }
     pub(crate) fn record(&self, list: &ID3D12GraphicsCommandList, texture: &ID3D12Resource) {
+        let _timer = crate::perf::time(crate::perf::Part::UploadRecording);
         for (i, footprint) in &self.footprints {
             let to = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: borrowed locations never release these live resources.
@@ -592,6 +593,11 @@ impl Upload {
     }
 }
 
+fn timed_hash(bytes: &[u8]) -> blake3::Hash {
+    let _timer = crate::perf::time(crate::perf::Part::Hashing);
+    blake3::hash(bytes)
+}
+
 impl Staging {
     /// After refreshing, take this version for an upcoming GPU copy.
     pub(crate) fn take_upload(&self) -> Option<Upload> {
@@ -609,7 +615,7 @@ impl Staging {
         for (i, footprint) in self.footprints.iter().enumerate() {
             let from = footprint.Offset as usize;
             let end = self.footprints.get(i + 1).map_or(self.bytes, |f| f.Offset) as usize;
-            let hash = blake3::hash(&last.linear[from..end]);
+            let hash = timed_hash(&last.linear[from..end]);
             if !crate::watch::dirty_tracking() || hashes[i] != Some(hash) {
                 let mut packed = *footprint;
                 bytes = bytes.next_multiple_of(512);
@@ -778,7 +784,7 @@ impl Staging {
             crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
             let changed = with_read(size, |read| {
                 crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
-                let hash = blake3::hash(read);
+                let hash = timed_hash(read);
                 if last.hash == Some(hash) {
                     return false;
                 }
@@ -798,7 +804,7 @@ impl Staging {
         }
         if through_copy() {
             return with_title(self.memory, size, |tiled| {
-                let hash = blake3::hash(tiled);
+                let hash = timed_hash(tiled);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
                 if last.hash == Some(hash) {
@@ -814,7 +820,7 @@ impl Staging {
         // SAFETY: committed memory of the texture's layout size, and it
         // stays committed while `_mapped` is held.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
-        let hash = blake3::hash(tiled);
+        let hash = timed_hash(tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
         if last.hash == Some(hash) {
@@ -839,7 +845,7 @@ impl Staging {
             if !crate::watch::stable_mapping_copy(|| crate::host::read_into(self.memory, read)) {
                 return false;
             }
-            let hash = blake3::hash(read);
+            let hash = timed_hash(read);
             if last.hash != Some(hash) {
                 last.hash = Some(hash);
                 self.detile(read, last);
