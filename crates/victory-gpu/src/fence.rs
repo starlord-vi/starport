@@ -111,6 +111,8 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
 }
 /// Moves the fence to `value` and sets the events that waited for it.
 pub(crate) fn set(this: This, value: u64) {
+    #[cfg(windows)]
+    crate::watchdog::event(5, this as u64, value);
     let fence = fence(this);
     let mut waiters = fence.waiters.lock().unwrap_or_else(|e| e.into_inner());
     fence.value.store(value, Ordering::Release);

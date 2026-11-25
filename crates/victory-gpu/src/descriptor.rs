@@ -721,6 +721,17 @@ pub(crate) fn make_waiting() {
 }
 
 fn record(handle: u64, view: View) {
+    #[cfg(windows)]
+    match &view {
+        View::Shader(r, _) => crate::watchdog::event(3, *r as u64, handle),
+        View::Unordered(r, _, _) => crate::watchdog::event(4, *r as u64, handle),
+        View::Placed(uav, _, words) => crate::watchdog::event(
+            if *uav { 4 } else { 3 },
+            u64::from(words[10]) | u64::from(words[11]) << 32,
+            handle,
+        ),
+        _ => {}
+    }
     if handle == 0 {
         return;
     }

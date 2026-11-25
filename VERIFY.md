@@ -230,4 +230,32 @@ the world's large shader-written buffers. Unit tests cover bounded slot reuse;
 a headless GPU test sends owned copies asynchronously and checks their bytes
 only after ordered completion. The movie regression remains passing.
 
+## Task 9: Series S diagnosis and an X-identity memory limit
+
+The watchdog is armed only by the user's normal game-run command, before
+starting the title. `STARPORT_WATCHDOG=1` is the default; `0` disables it.
+`STARPORT_WATCHDOG_SECONDS` defaults to 10 (range 1..600). Without a present,
+`starport::watchdog` reports native/host fence watermarks, active submission
+phase/age, pending pipelines, held queues, upload-resource counts and up to
+200 recent phase/dispatch/SRV/UAV/fence events. Contended history events are
+dropped and counted rather than delaying renderer threads.
+
+Optional `STARPORT_WATCHDOG_STACKS=1` requests the loader's existing stack
+dump helper, including title/main threads; default `0` avoids periodic thread
+suspension. The helper preallocates unwinding storage, resumes each thread
+before printing, and reports `module+rva`. No-present diagnostics cannot detect
+a continuously presented black image; a black Series S compositor path is
+not thereby diagnosed or fixed.
+
+For a separate comparison, keep `--console series-x` and set
+`STARPORT_MEM_BUDGET_MB=8192`. Unset/`0` disables the override. Accepted
+values are 2048..65536 MiB, rounded down to 2 MiB and capped to the selected
+profile. Only reported title pool budgets change; X/S identity and real host
+DXGI VRAM budgets remain independent. The smaller total is split proportionally
+between X's bandwidth classes, so DXGI adapter memory, working-set statistics,
+GlobalMemoryStatusEx and transfer accounting use one consistent split. It is
+not a hard host allocation cap and does not force resolution. Usage is not
+fabricated or clamped to fit; a preallocated title pool can exceed a newly
+reported limit. Compare boot and streaming behavior before calling it usable.
+
 Further comparisons will be added as their hazard checks are completed.

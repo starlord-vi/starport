@@ -70,6 +70,10 @@ mod telemetry;
 mod texture;
 #[cfg(windows)]
 mod watch;
+#[cfg(windows)]
+mod watchdog;
+#[cfg(windows)]
+pub use watchdog::{on_stacks as on_watchdog_stacks, start as start_watchdog};
 
 #[cfg(windows)]
 pub use host::on_failure;

@@ -60,6 +60,11 @@ enum Held {
 static WAITING: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(windows)]
+pub(crate) fn watchdog_waiting() -> Option<usize> {
+    WAITING.try_lock().ok().map(|q| q.len())
+}
+
+#[cfg(windows)]
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -647,6 +652,8 @@ extern "system" fn signal(this: This, fence: This, value: u64) -> HRESULT {
 /// ([`Held`]) until a signal or a list's bottom-of-pipe write gets the
 /// fence there.
 extern "system" fn wait(this: This, fence: This, value: u64) -> HRESULT {
+    #[cfg(windows)]
+    crate::watchdog::event(6, fence as u64, value);
     if fence.is_null() {
         return E_INVALIDARG;
     }

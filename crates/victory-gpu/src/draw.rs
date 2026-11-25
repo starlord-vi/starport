@@ -1810,6 +1810,7 @@ impl State {
 
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
+        crate::watchdog::event(2, self.pipeline as u64, u64::from(x));
         if crate::telemetry::enabled()
             && let Some(hash) = crate::pipeline::guarded_compute_hash(self.pipeline as This)
         {

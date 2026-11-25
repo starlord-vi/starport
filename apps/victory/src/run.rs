@@ -127,6 +127,8 @@ pub fn run(
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
     // SAFETY: imports are bound; from here on we run title code.
+    victory_hle::on_watchdog_stacks(victory_loader::dump_stacks);
+    victory_hle::start_watchdog();
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
     if let Some(seconds) = seconds {
         victory_hle::modules::lifecycle::stop_after(seconds);

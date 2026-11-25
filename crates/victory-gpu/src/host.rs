@@ -263,6 +263,7 @@ static SUBMITTING: [std::sync::atomic::AtomicU64; 3] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 fn submitting(phase: u64, lists: usize) {
+    crate::watchdog::event(1, phase, lists as u64);
     SUBMITTING[1].store(lists as u64, Ordering::Relaxed);
     SUBMITTING[2].store(now_us(), Ordering::Relaxed);
     SUBMITTING[0].store(phase, Ordering::Relaxed);
@@ -544,8 +545,20 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
 
 /// The host GPU, created on first use; `None` without one (a run then
 /// behaves as before: nothing executes).
+static HOST: OnceLock<Option<Host>> = OnceLock::new();
+pub(crate) fn watchdog_snapshot(stalled_ms: u64) {
+    let native = HOST
+        .get()
+        .and_then(Option::as_ref)
+        .map(|host| unsafe { host.fence.GetCompletedValue() });
+    tracing::warn!(target:"starport::watchdog",stalled_ms,native_fence=?native,
+        started=started_submission(),finished=finished_submission(),phase=SUBMITTING[0].load(Ordering::Relaxed),
+        phase_lists=SUBMITTING[1].load(Ordering::Relaxed),phase_age_us=now_us().saturating_sub(SUBMITTING[2].load(Ordering::Relaxed)),
+        pending_pipelines=crate::pipeline::making(),waiting_texture_slots=crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed),
+        held_queues=?crate::queue::watchdog_waiting(),upload_buffers_alive=ALIVE[6].load(Ordering::Relaxed),upload_bytes_alive=ALIVE[7].load(Ordering::Relaxed),
+        "no present; phase identifies preparing/fence-wait/copy-back, not an inferred title wait");
+}
 pub(crate) fn host() -> Option<&'static Host> {
-    static HOST: OnceLock<Option<Host>> = OnceLock::new();
     HOST.get_or_init(|| match create() {
         Ok(host) => Some(host),
         Err(e) => {
@@ -6384,6 +6397,7 @@ impl Meter {
 
     /// Counts a presented frame.
     fn frame(&mut self, hwnd: HWND, pending_frames: usize) {
+        crate::watchdog::presented();
         let flights = line()
             .line
             .iter()
