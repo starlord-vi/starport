@@ -2,9 +2,9 @@
 //! Initialization uses a private queue: descriptor publication can run while
 //! the normal submission mutex is held, so Host::execute would deadlock here.
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{LazyLock, Mutex, OnceLock};
-use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
@@ -46,6 +46,7 @@ fn selected() -> Color {
     })
 }
 static WRITES: AtomicU64 = AtomicU64::new(0);
+static DISABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn writes() -> u64 {
     WRITES.load(Relaxed)
 }
@@ -162,24 +163,39 @@ fn make(
                 | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         )]);
         list.Close()?;
+        let submitted: ID3D12CommandList = windows::core::Interface::cast(&list)?;
         let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
         // Register completion before execution, avoiding a resource lifetime
-        // gap if registration fails. The event is closed on every return.
+        // gap if registration fails. After submission an uncertain completion
+        // must retain the event as well as the command's GPU objects.
         let event = CreateEventW(None, false, false, None)?;
+        if let Err(error) = fence.SetEventOnCompletion(1, event) {
+            let _ = CloseHandle(event);
+            return Err(error);
+        }
+        queue.ExecuteCommandLists(&[Some(submitted)]);
         let wait = (|| -> Result<()> {
-            fence.SetEventOnCompletion(1, event)?;
-            queue.ExecuteCommandLists(&[Some(windows::core::Interface::cast(&list)?)]);
             queue.Signal(&fence, 1)?;
-            WaitForSingleObject(event, INFINITE);
-            if fence.GetCompletedValue() != 1 {
+            if WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0
+                || fence.GetCompletedValue() != 1
+            {
                 return Err(windows::core::Error::from_hresult(
                     windows::Win32::Foundation::E_FAIL,
                 ));
             }
             Ok(())
         })();
+        if let Err(error) = wait {
+            // Submission already happened, but its completion is unknown.
+            // Keep everything alive rather than release GPU-referenced memory
+            // or an event the fence may still signal. Disable future attempts
+            // so this exceptional quarantine cannot grow without bound.
+            DISABLED.store(true, Relaxed);
+            std::mem::forget((image, rtv, queue, allocator, list, fence));
+            tracing::error!(%error, "fallback initialization completion unknown; retained submission objects and disabled color diagnostics");
+            return Err(error);
+        }
         let _ = CloseHandle(event);
-        wait?;
         Ok(image)
     }
 }
@@ -191,7 +207,7 @@ pub(crate) fn write(
     at: D3D12_CPU_DESCRIPTOR_HANDLE,
 ) -> bool {
     let color = selected();
-    if color == Color::Black {
+    if color == Color::Black || DISABLED.load(Relaxed) {
         return false;
     }
     let Some((dimension, layers, samples)) = shape(&view) else {
@@ -212,6 +228,9 @@ pub(crate) fn write(
         return false;
     };
     let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    if DISABLED.load(Relaxed) {
+        return false;
+    }
     if images.len() >= 64 && !images.contains_key(&key) {
         static LIMIT: std::sync::Once = std::sync::Once::new();
         LIMIT.call_once(|| {
