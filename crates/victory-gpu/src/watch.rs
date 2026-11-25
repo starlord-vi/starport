@@ -833,6 +833,18 @@ mod tests {
         } as usize;
         assert_ne!(p, 0);
         let (start, end) = (p, p + 4 * PAGE);
+        // VirtualAlloc may reuse an address journaled by an earlier test.
+        // `writes` intentionally reports the journal's history, not just the
+        // current reservation's kernel bits. Start this fixture's history at
+        // allocation, without resetting any other allocation or assertions.
+        {
+            let (first, last) = (start / PAGE, end / PAGE);
+            let mut journal = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+            journal
+                .written
+                .retain(|&page, _| page < first || last <= page);
+            journal.ahead.retain(|&(a, b)| b <= first || last <= a);
+        }
         let (_, before) = writes(start, end, false).expect("watched");
         assert!(before.is_empty());
         // SAFETY: committed pages of ours.
