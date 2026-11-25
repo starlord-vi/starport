@@ -65,6 +65,8 @@ pub(crate) struct Shader {
     container: Vec<u8>,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
+    #[cfg(windows)]
+    bindings: OnceLock<Option<Vec<victory_shader::UsedResource>>>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -121,6 +123,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 container: bytes.to_vec(),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
+                #[cfg(windows)]
+                bindings: OnceLock::new(),
             })
         })
         .clone()
@@ -138,6 +142,22 @@ pub(crate) struct Translated {
 
 #[cfg(windows)]
 impl Shader {
+    pub(crate) fn binding_metadata(&self) -> Option<&[victory_shader::UsedResource]> {
+        if let Some(Some(translated)) = self.translated.get() {
+            return Some(&translated.used);
+        }
+        self.bindings
+            .get_or_init(|| {
+                let container = victory_shader::Container::parse(&self.container).ok()?;
+                let part = container.part(victory_shader::FourCC::DXIL)?;
+                let programs = victory_shader::native_programs(part.data).ok()?;
+                programs
+                    .into_iter()
+                    .find(|p| p.stage == victory_shader::HwStage::Cs)
+                    .map(|p| p.used)
+            })
+            .as_deref()
+    }
     /// The translation, made on first use; a shader that does not
     /// translate is logged once.
     pub(crate) fn translated(&self) -> Option<&Translated> {
@@ -383,7 +403,7 @@ fn pipeline<'a>(this: This) -> &'a Pipeline {
 }
 
 #[cfg(windows)]
-pub(crate) fn guarded_compute_hash(this: This) -> Option<String> {
+pub(crate) fn guarded_compute_shader(this: This) -> Option<Arc<Shader>> {
     if this.is_null() {
         return None;
     }
@@ -396,7 +416,7 @@ pub(crate) fn guarded_compute_hash(this: This) -> Option<String> {
                 "2da4beb386509b77" | "369cbe906ea72764" | "02384a60fda6f2d0" | "6b82bc7d22016cb5"
             )
         })
-        .map(|s| s.hash.clone())
+        .cloned()
 }
 
 /// List method: logs each pipeline's shaders the first time a list binds

@@ -258,4 +258,19 @@ not a hard host allocation cap and does not force resolution. Usage is not
 fabricated or clamped to fit; a preallocated title pool can exceed a newly
 reported limit. Compare boot and streaming behavior before calling it usable.
 
+## Task 10: guarded compute dataflow
+
+`STARPORT_WAVE64_TRACE=1` is the default; `0` disables the additional binding
+trace. `starport::refused` now distinguishes direct and indirect recording
+attempts per sampled frame. `starport::wave64` identifies each of the four
+hashes, native resource-use metadata, statically resolved potential UAV
+outputs, unresolved bindings and later bound potential consumers. Nothing
+executes these refused shaders. Dynamic indices and object aliases are not
+fully observable, so missing edges cannot prove that an output is unused.
+
+See [the per-shader emulation design](docs/wave64-emulation.md). Its four PSO
+failures remain expected; neither Wave32 forcing nor groupshared emulation is
+enabled. Binding diagnostics can add CPU work while enabled; use the kill
+switch for timing comparisons after collecting the needed evidence.
+
 Further comparisons will be added as their hazard checks are completed.

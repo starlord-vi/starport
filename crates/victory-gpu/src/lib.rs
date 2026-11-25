@@ -17,6 +17,8 @@
 
 #[cfg(windows)]
 mod ambient;
+#[cfg(windows)]
+mod binding_trace;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
 pub mod console;

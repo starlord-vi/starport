@@ -134,7 +134,7 @@ struct Frame {
     resources: BTreeMap<(bool, u64, &'static str), (Shape, u64)>,
     reasons: [u64; 4],
     overflow_bytes: u64,
-    refused: BTreeMap<String, u64>,
+    refused: BTreeMap<(String, bool), u64>,
     ambient_hits: u64,
 }
 
@@ -174,14 +174,14 @@ pub(crate) fn phase(which: usize, us: u64) {
     }
 }
 
-pub(crate) fn refused(hash: &str) {
+pub(crate) fn refused(hash: &str, indirect: bool) {
     if enabled() {
         *STATE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .frame
             .refused
-            .entry(hash.to_owned())
+            .entry((hash.to_owned(), indirect))
             .or_default() += 1;
     }
 }
@@ -243,8 +243,8 @@ pub(crate) fn present(flights: usize, pending_frames: usize) {
                 format=s.format, bytes, reason, "resource attribution");
         }
     }
-    for (hash, attempts) in frame.refused {
-        tracing::info!(target: "starport::refused", sample_frame=crate::frame::current(), hash, attempts,
+    for ((hash, indirect), attempts) in frame.refused {
+        tracing::info!(target: "starport::refused", sample_frame=crate::frame::current(), hash, attempts,indirect,
             "guarded compute dispatch recording attempts; not executed");
     }
 }

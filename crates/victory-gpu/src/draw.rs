@@ -699,6 +699,63 @@ impl State {
         hit
     }
 
+    fn trace_binding_key(
+        &self,
+        compute: bool,
+        used: &victory_shader::UsedResource,
+    ) -> Option<crate::binding_trace::Key> {
+        use crate::binding_trace::Key;
+        match (
+            used.root,
+            self.roots_ref(compute).get(usize::from(used.slot)),
+        ) {
+            (RootType::Descriptor, Some(Root::View(address))) => {
+                let bytes = crate::shadow::extent(*address).map_or(0, |(start, len)| {
+                    start.saturating_add(len).saturating_sub(*address)
+                });
+                Some(Key::Memory(*address, bytes))
+            }
+            (RootType::Table, Some(Root::Table(table))) => {
+                let handle = table.checked_add(u64::from(used.table_offset_dwords) * 4)?;
+                self.heap_of(handle)?;
+                match crate::descriptor::view(handle)? {
+                    View::Constant(address, bytes) => Some(Key::Memory(address, bytes.into())),
+                    View::Shader(resource, _) | View::Unordered(resource, _, _)
+                        if resource != 0 =>
+                    {
+                        Some(Key::Object(resource))
+                    }
+                    View::Placed(_, resource, words) => Some(Key::Memory(
+                        u64::from(words[10]) | u64::from(words[11]) << 32,
+                        crate::resource::placed_bytes(&resource).unwrap_or(0),
+                    )),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn trace_guarded_bindings(&self, shader: &crate::pipeline::Shader, groups: Option<[u32; 3]>) {
+        if !crate::binding_trace::enabled() {
+            return;
+        }
+        let metadata = shader.binding_metadata();
+        crate::binding_trace::begin(&shader.hash, groups, metadata.is_some());
+        if let Some(metadata) = metadata {
+            for used in metadata {
+                crate::binding_trace::binding(
+                    &shader.hash,
+                    used.slot,
+                    &format!("{:?}", used.kind),
+                    &format!("{:?}", used.root),
+                    used.table_offset_dwords,
+                    self.trace_binding_key(true, used),
+                );
+            }
+        }
+    }
+
     /// The user-data value of a root argument, as translated shaders read
     /// it: a table's byte offset in its heap, a constant's value.
     fn user_value(&self, compute: bool, slot: u8, root: RootType, dword: u32) -> u32 {
@@ -1167,6 +1224,19 @@ impl State {
         // Depth textures it writes through unordered access: their colour
         // twins hold what they lack from here on.
         list.twins_written();
+        if crate::binding_trace::watching() {
+            for stage in &p.stages {
+                for used in &stage.translated().used {
+                    if matches!(
+                        used.kind,
+                        ResourceType::Srv | ResourceType::Cbv | ResourceType::Uav
+                    ) && let Some(key) = self.trace_binding_key(compute, used)
+                    {
+                        crate::binding_trace::consumer(&stage.shader.hash, key);
+                    }
+                }
+            }
+        }
         true
     }
 
@@ -1811,10 +1881,11 @@ impl State {
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
         crate::watchdog::event(2, self.pipeline as u64, u64::from(x));
-        if crate::telemetry::enabled()
-            && let Some(hash) = crate::pipeline::guarded_compute_hash(self.pipeline as This)
+        if (crate::telemetry::enabled() || crate::binding_trace::enabled())
+            && let Some(shader) = crate::pipeline::guarded_compute_shader(self.pipeline as This)
         {
-            crate::telemetry::refused(&hash);
+            crate::telemetry::refused(&shader.hash, false);
+            self.trace_guarded_bindings(&shader, Some([x, y, z]));
         }
         // It may write the arguments a window holds clamped.
         self.window = None;
@@ -2448,6 +2519,13 @@ impl State {
         arguments: u64,
         count: Option<u64>,
     ) -> bool {
+        if kind == 2
+            && (crate::telemetry::enabled() || crate::binding_trace::enabled())
+            && let Some(shader) = crate::pipeline::guarded_compute_shader(self.pipeline as This)
+        {
+            crate::telemetry::refused(&shader.hash, true);
+            self.trace_guarded_bindings(&shader, None);
+        }
         // Skip before the argument clamp can mutate the indirect buffer.
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
