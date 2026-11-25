@@ -6153,10 +6153,42 @@ impl Host {
     }
 
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        static REBAR: OnceLock<bool> = OnceLock::new();
+        let rebar=*REBAR.get_or_init(|| {
+            let requested=std::env::var_os("STARPORT_REBAR_UPLOAD").is_some_and(|v|v=="1");
+            let mut options=D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+            // SAFETY: feature query with the correct output structure size.
+            let supported=unsafe {self.device.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS16,
+                (&raw mut options).cast(),size_of_val(&options) as u32)}.is_ok() && options.GPUUploadHeapSupported.as_bool();
+            tracing::info!(target:"starport::upload",requested,supported,"CPU-visible VRAM upload capability");
+            requested && supported
+        });
+        let room = rebar
+            && self.video_memory().is_some_and(|[budget, used, ..]| {
+                budget > 0
+                    && used.saturating_add(size) < budget / 100 * crate::residency::target_pct()
+            });
+        if rebar && room {
+            if let Some(buffer) = self.upload_buffer_kind(size, D3D12_HEAP_TYPE_GPU_UPLOAD) {
+                return Some(buffer);
+            }
+            tracing::warn!(
+                size,
+                "CPU-visible VRAM allocation failed; retrying ordinary UPLOAD heap"
+            );
+        }
+        self.upload_buffer_kind(size, D3D12_HEAP_TYPE_UPLOAD)
+    }
+
+    fn upload_buffer_kind(
+        &self,
+        size: u64,
+        kind: D3D12_HEAP_TYPE,
+    ) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_UPLOAD,
+            Type: kind,
             ..Default::default()
         };
         let desc = D3D12_RESOURCE_DESC {
@@ -6196,6 +6228,43 @@ impl Host {
                 tracing::warn!(error = %e, size, "no upload buffer");
                 None
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    #[test]
+    fn selected_upload_heap_reaches_a_gpu_copy_and_readback() {
+        let h = host().unwrap();
+        let (source, data) = h.upload_buffer(256).unwrap();
+        let read = h.read_back_buffer(256).unwrap();
+        let list = h.new_list().unwrap();
+        // SAFETY: two live 256-byte buffers; upload is GENERIC_READ and
+        // readback is COPY_DEST. The CPU pointer is write-only here.
+        unsafe {
+            data.write_bytes(0xA5, 256);
+            list.list.CopyBufferRegion(&read, 0, &source, 0, 256);
+            list.close();
+            h.execute(&[&list]);
+            let mut props = D3D12_HEAP_PROPERTIES::default();
+            source.GetHeapProperties(Some(&mut props), None).unwrap();
+            assert!(matches!(
+                props.Type,
+                D3D12_HEAP_TYPE_UPLOAD | D3D12_HEAP_TYPE_GPU_UPLOAD
+            ));
+            eprintln!(
+                "STARPORT upload smoke: heap_type={} (2=UPLOAD, 5=GPU_UPLOAD)",
+                props.Type.0
+            );
+            let mut result = std::ptr::null_mut();
+            read.Map(0, None, Some(&mut result)).unwrap();
+            assert_eq!(
+                std::slice::from_raw_parts(result.cast::<u8>(), 256),
+                [0xA5; 256]
+            );
+            read.Unmap(0, None);
         }
     }
 }

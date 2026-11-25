@@ -24,6 +24,51 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 use crate::host::{HostList, host};
 use crate::watch::PAGE;
 
+#[cfg(test)]
+mod fine_upload_tests {
+    use super::*;
+    #[test]
+    fn one_dirty_kernel_page_does_not_refresh_its_64k_neighbors() {
+        use windows_sys::Win32::System::Memory::*;
+        const SIZE: usize = 64 << 10;
+        const MEM_WRITE_WATCH: u32 = 0x20_0000;
+        // SAFETY: a private write-watched reservation, freed after its shadow.
+        let source = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                SIZE,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        };
+        assert!(!source.is_null());
+        // Touch every page before the first watch reset, as a title's
+        // initial buffer fill does (avoid demand-zero first-touch effects).
+        unsafe {
+            source.cast::<u8>().write_bytes(0, SIZE);
+        }
+        let h = host().unwrap();
+        let (buffer, data) = h.shared_buffer(SIZE as u64).unwrap();
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let copy = Shadow::new(buffer, data, gpu, source as u64, SIZE as u64);
+        assert_eq!(PAGE, 4096);
+        assert_eq!(copy.update(source as usize, SIZE), SIZE);
+        unsafe {
+            source.cast::<u8>().add(3 * PAGE + 8).write(127);
+        }
+        assert_eq!(copy.update(source as usize, SIZE), PAGE);
+        unsafe {
+            assert_eq!(*data.add(3 * PAGE + 8), 127);
+            assert_eq!(*data.add(2 * PAGE + 8), 0);
+        }
+        assert_eq!(copy.update(source as usize, SIZE), 0);
+        drop(copy);
+        unsafe {
+            assert_ne!(VirtualFree(source, 0, MEM_RELEASE), 0);
+        }
+    }
+}
+
 /// A title buffer's host copy.
 pub(crate) struct Shadow {
     telemetry: crate::telemetry::Resource,

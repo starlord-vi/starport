@@ -23,12 +23,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-/// The unit tracked and copied: 64 KiB, the console's page (the kernel's
-/// 4 KiB pages fold into it). Finer units made the checks of the world's
-/// big buffers cost more than the copies they saved.
-pub(crate) const PAGE: usize = 64 << 10;
+/// Kernel dirty-page granularity; section guards remain 64 KiB. Larger
+/// journal units fold unrelated 4 KiB writes into whole 64 KiB uploads.
+pub(crate) const PAGE: usize = 4096;
 /// The kernel's page, the unit of its answers.
 const KERNEL_PAGE: usize = 4096;
+
+pub(crate) fn dirty_tracking() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let enabled=std::env::var_os("STARPORT_DIRTY_TRACKING").is_none_or(|v|v!="0");
+        tracing::info!(target:"starport::upload",enabled,dirty_page_bytes=PAGE,section_guard_bytes=64<<10,
+            "dirty tracking policy; 0 uses conservative whole refreshes");enabled
+    })
+}
 
 struct Journal {
     /// Numbers the askings; 0 is "never".
@@ -72,6 +80,9 @@ const AHEAD_MAX: usize = (1 << 30) / PAGE;
 /// 456 ms, in run 14). Ranges that are not write-watched, or lie alone, are
 /// left to `writes`.
 pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
+    if !dirty_tracking() {
+        return;
+    }
     let mut pieces: Vec<(usize, usize)> = ranges
         .iter()
         .filter(|r| r.0 < r.1)
@@ -170,6 +181,9 @@ pub(crate) fn once() -> bool {
 /// refresh) as [`ask_ahead`] does, and lets that asking stand until
 /// [`ask_once_end`].
 pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
+    if !dirty_tracking() {
+        return;
+    }
     if !once() {
         return;
     }
@@ -310,6 +324,9 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
 /// kernel just reported. `None` if the memory is not write-watched (nor,
 /// with `guarded`, view memory, which is then guarded).
 pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Vec<(usize, u64)>)> {
+    if !dirty_tracking() {
+        return None;
+    }
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
@@ -381,7 +398,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
 }
 
 /// Guarded blocks of view memory.
-const BLOCK: usize = PAGE;
+const BLOCK: usize = 64 << 10;
 
 struct Guards {
     /// Blocks we made read-only.
@@ -882,7 +899,7 @@ mod tests {
         assert_eq!(landed, b"from the disk");
         assert_eq!(
             guard(view, view + 2 * BLOCK),
-            Some((view / PAGE..view / PAGE + 1).collect())
+            Some((view / PAGE..(view + BLOCK) / PAGE).collect())
         );
         // SAFETY: our view.
         unsafe {
@@ -940,7 +957,10 @@ mod tests {
         commit(start, BLOCK);
         commit(early, KERNEL_PAGE);
         let refresh = || guard(start, start + SIZE).unwrap();
-        assert_eq!(refresh(), [start / PAGE, early / PAGE, late / PAGE]);
+        assert_eq!(
+            refresh(),
+            (start / PAGE..(start + SIZE) / PAGE).collect::<Vec<_>>()
+        );
         // The last block is still entirely reserved.
         assert!(!refresh().contains(&(late / PAGE)));
 
@@ -950,7 +970,10 @@ mod tests {
             // SAFETY: each address is inside its committed read-write page.
             unsafe { (at as *mut u8).write_volatile(1) };
         }
-        assert_eq!(refresh(), [early / PAGE, late / PAGE]);
+        assert_eq!(
+            refresh(),
+            ((start + BLOCK) / PAGE..(start + SIZE) / PAGE).collect::<Vec<_>>()
+        );
     }
 
     /// A range of view memory whose first block is not mapped is a view

@@ -159,4 +159,42 @@ keeps a resource alive through CPU and recorded-list ownership, then releases
 it after reset and rejects an obsolete allocation generation. LRU ordering,
 range overlap and fence-age eligibility have focused tests.
 
+## Task 6: fine dirty tracking and optional ReBAR uploads
+
+For the prior-stage baseline set `STARPORT_DIRTY_TRACKING=0`; then compare
+`1` (new default). Private write-watched allocations retain individual 4 KiB
+page stamps instead of folding them into 64 KiB copies. Mapped-section guards
+remain 64 KiB and deliberately mark all 16 constituent pages dirty; writes
+through another alias still require the full-content texture hash. Existing
+remap/no-wait safety checks and immutable per-submission snapshots remain.
+Disabling dirty tracking uses conservative whole buffer refreshes and full
+texture uploads. It is a correctness-preserving, potentially slow baseline.
+Four-KiB journaling also increases per-page bookkeeping; compare preparing
+time even if the uploaded-byte count falls. An offline pass is not a speed-up.
+
+Texture hashes belong to the host allocation, survive staging recreation and
+select only changed mip/array subresources. Selected footprints are packed
+into one immutable upload buffer, retaining original destination subresource
+indices. CPU staging is then released. A changed mip is still detiled/copied
+as a whole mip; this does not implement arbitrary BC tile updates. Source
+hashing/detiling can still cost CPU time. Unique-upload telemetry now also
+belongs to the allocation rather than a temporary staging object's lifetime.
+
+Check actual upload bytes/reasons in `starport::resource` and repeat bytes in
+`starport::telemetry`; legacy "checked/staged" counters can remain high even
+when fewer bytes are uploaded. A synthetic GPU/readback regression verifies
+one changed byte reaches mip 1 while unchanged mips and recreated staging
+produce no extra upload. Native write-watch coverage verifies a dirty 4 KiB
+page does not refresh its 64 KiB neighbors; movie snapshot coverage remains.
+
+`STARPORT_REBAR_UPLOAD=1` optionally selects CPU-visible GPU upload heaps;
+default/kill switch `0` uses ordinary UPLOAD heaps. Support is queried through
+D3D12 OPTIONS16, not assumed from the GPU model. Allocation also needs local
+budget headroom; failure falls back to ordinary upload. Check the capability
+log (`requested`, `supported`). This only changes upload-buffer placement;
+it does not expose shader-written guest buffers directly or eliminate every
+copy. Test it separately because it consumes the same limited local VRAM.
+See [Microsoft's GPU upload heap specification](https://microsoft.github.io/DirectX-Specs/d3d/D3D12GPUUploadHeaps.html)
+and [write-watch reset semantics](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-getwritewatch).
+
 Further comparisons will be added as their hazard checks are completed.

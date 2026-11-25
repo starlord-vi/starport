@@ -1138,6 +1138,8 @@ struct Resource {
 pub(crate) struct HostTexture {
     pub(crate) epoch: u64,
     pub(crate) demoted: bool,
+    pub(crate) upload_hashes: std::sync::Arc<std::sync::Mutex<Vec<Option<blake3::Hash>>>>,
+    pub(crate) upload_telemetry: std::sync::OnceLock<std::sync::Arc<crate::telemetry::Resource>>,
     /// Source mip represented by host mip zero (CPU-streamed views only).
     pub(crate) first_mip: u32,
     pub(crate) last_used_frame: std::sync::atomic::AtomicU64,
@@ -1648,6 +1650,8 @@ impl HostTexture {
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
         HOST_TEXTURES[1].fetch_add(bytes, Relaxed);
         HostTexture {
+            upload_hashes: std::sync::Arc::default(),
+            upload_telemetry: std::sync::OnceLock::new(),
             demoted: false,
             epoch: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -3085,6 +3089,124 @@ mod tests {
 
     /// Movie decoders rotate CPU-written textures. Every submission must
     /// sample this frame, including writes made after list recording.
+    #[cfg(windows)]
+    #[test]
+    fn recreated_staging_skips_unchanged_mips_and_uploads_only_the_dirty_subresource() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let h = crate::host::host().unwrap();
+        let null = std::ptr::null();
+        let mut image = null;
+        assert_eq!(
+            create_committed(
+                null,
+                &PROPERTIES,
+                0,
+                &texture(8, 8, 28, 4),
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut image
+            ),
+            S_OK
+        );
+        let copy = host_resource(image).unwrap();
+        let initial = crate::texture::snapshot_for_test(image, &copy.texture).unwrap();
+        assert_eq!(initial.subresources(), [0, 1, 2, 3]);
+        let first_bytes = initial.bytes;
+        let send = |upload: &crate::texture::Upload| {
+            let list = h.new_list().unwrap();
+            // SAFETY: this test owns a new texture in COMMON; snapshots are
+            // immutable and live until execute completes.
+            unsafe {
+                list.list.ResourceBarrier(&[crate::host::transition(
+                    &copy.texture,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                )]);
+            }
+            upload.record(&list.list, &copy.texture);
+            unsafe {
+                list.list.ResourceBarrier(&[crate::host::transition(
+                    &copy.texture,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COMMON,
+                )]);
+            }
+            list.close();
+            h.execute(&[&list]);
+        };
+        send(&initial);
+        crate::texture::unstage(image);
+        assert!(
+            crate::texture::snapshot_for_test(image, &copy.texture).is_none(),
+            "allocation hashes survive staging recreation"
+        );
+        let (memory, desc) = texture_memory(image).unwrap();
+        let layout = &texture_layout(&desc).unwrap().planes[0].layout;
+        let offset = layout.offset(1, 0, 0, 0).unwrap() as usize;
+        // SAFETY: one texel in the owned synthetic title allocation.
+        unsafe {
+            memory.cast_mut().add(offset).write(42);
+        }
+        let changed = crate::texture::snapshot_for_test(image, &copy.texture).unwrap();
+        assert_eq!(changed.subresources(), [1]);
+        assert!(changed.bytes < first_bytes);
+        send(&changed);
+        let read = h.read_back_buffer(1024).unwrap();
+        let back = h.new_list().unwrap();
+        // SAFETY: mip 1 is 4x4 RGBA8; the synthetic readback has four
+        // 256-byte-pitched rows and the submission is waited for.
+        unsafe {
+            back.list.ResourceBarrier(&[crate::host::transition(
+                &copy.texture,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+            let from = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(&copy.texture),
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: 1,
+                },
+            };
+            let to = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(&read),
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: 0,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(28),
+                            Width: 4,
+                            Height: 4,
+                            Depth: 1,
+                            RowPitch: 256,
+                        },
+                    },
+                },
+            };
+            back.list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+            back.list.ResourceBarrier(&[crate::host::transition(
+                &copy.texture,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_COMMON,
+            )]);
+            back.close();
+            h.execute(&[&back]);
+            let mut bytes = std::ptr::null_mut();
+            read.Map(0, None, Some(&mut bytes)).unwrap();
+            assert_eq!(
+                *bytes.cast::<u8>(),
+                42,
+                "sparse upload copied the changed byte into mip 1"
+            );
+            read.Unmap(0, None);
+        }
+        assert!(crate::texture::snapshot_for_test(image, &copy.texture).is_none());
+        drop(copy);
+        slot::<Release>(image, 0x10)(image);
+    }
+
     #[cfg(windows)]
     #[test]
     fn rotating_movie_textures_upload_the_current_frame() {

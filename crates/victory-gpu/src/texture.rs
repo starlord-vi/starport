@@ -36,7 +36,8 @@ pub(crate) struct Staging {
     epoch: u64,
     demoted: bool,
     host_key: usize,
-    telemetry: crate::telemetry::Resource,
+    telemetry: Arc<crate::telemetry::Resource>,
+    upload_hashes: Arc<Mutex<Vec<Option<blake3::Hash>>>>,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     layout: victory_formats::texture::Layout,
@@ -557,18 +558,22 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
 pub(crate) struct Upload {
     pub(crate) buffer: ID3D12Resource,
     pub(crate) bytes: u64,
-    footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
+    footprints: Vec<(u32, D3D12_PLACED_SUBRESOURCE_FOOTPRINT)>,
 }
 
 impl Upload {
+    #[cfg(test)]
+    pub(crate) fn subresources(&self) -> Vec<u32> {
+        self.footprints.iter().map(|f| f.0).collect()
+    }
     pub(crate) fn record(&self, list: &ID3D12GraphicsCommandList, texture: &ID3D12Resource) {
-        for (i, footprint) in self.footprints.iter().enumerate() {
+        for (i, footprint) in &self.footprints {
             let to = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: borrowed locations never release these live resources.
                 pResource: unsafe { std::mem::transmute_copy(texture) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                 Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                    SubresourceIndex: i as u32,
+                    SubresourceIndex: *i,
                 },
             };
             let from = D3D12_TEXTURE_COPY_LOCATION {
@@ -597,35 +602,70 @@ impl Staging {
             crate::copystat::add(crate::copystat::C::TexSkipped, 1);
             return None;
         }
-        let (buffer, data) = host()
-            .and_then(|h| h.upload_buffer(self.bytes))
-            .unwrap_or_else(|| {
-                crate::host::fail(format_args!("no memory for a texture upload snapshot"))
-            });
-        // SAFETY: both mappings hold `bytes`; last excludes detiling while
-        // we copy, and only this submission owns the new destination.
-        unsafe {
-            std::ptr::copy_nonoverlapping(last.linear.as_ptr(), data, self.bytes as usize);
+        let mut hashes = self.upload_hashes.lock().unwrap_or_else(|e| e.into_inner());
+        hashes.resize(self.footprints.len(), None);
+        let mut selected = Vec::new();
+        let mut bytes = 0u64;
+        for (i, footprint) in self.footprints.iter().enumerate() {
+            let from = footprint.Offset as usize;
+            let end = self.footprints.get(i + 1).map_or(self.bytes, |f| f.Offset) as usize;
+            let hash = blake3::hash(&last.linear[from..end]);
+            if !crate::watch::dirty_tracking() || hashes[i] != Some(hash) {
+                let mut packed = *footprint;
+                bytes = bytes.next_multiple_of(512);
+                packed.Offset = bytes;
+                bytes += (end - from) as u64;
+                selected.push((i as u32, packed, from, end, hash));
+            }
         }
-        // The immutable upload owns this version until its fence completes.
-        // Hash/watch metadata is sufficient to skip an unchanged texture;
-        // retaining a second full CPU image can consume gigabytes.
+        let upload = if selected.is_empty() {
+            None
+        } else {
+            let (buffer, data) = host()
+                .and_then(|h| h.upload_buffer(bytes))
+                .unwrap_or_else(|| {
+                    crate::host::fail(format_args!("no memory for a texture upload snapshot"))
+                });
+            for &(index, packed, from, end, hash) in &selected {
+                // SAFETY: both spans are within their checked CPU/upload
+                // allocations. Only this submission owns the destination.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        last.linear.as_ptr().add(from),
+                        data.add(packed.Offset as usize),
+                        end - from,
+                    );
+                }
+                hashes[index as usize] = Some(hash);
+                self.telemetry.upload(
+                    from as u64,
+                    (end - from) as u64,
+                    crate::telemetry::Reason::initial(self.first_mip, self.demoted),
+                );
+            }
+            crate::residency::uploaded(self.host_key);
+            Some(Upload {
+                buffer,
+                bytes,
+                footprints: selected
+                    .iter()
+                    .map(|&(index, footprint, _, _, _)| (index, footprint))
+                    .collect(),
+            })
+        };
         STAGED[1].fetch_sub(last.linear.len() as u64, Relaxed);
         last.linear = Vec::new();
         self.dirty.store(false, Relaxed);
-        self.telemetry.upload(
-            0,
-            self.bytes,
-            crate::telemetry::Reason::initial(self.first_mip, self.demoted),
-        );
-        crate::residency::uploaded(self.host_key);
         #[cfg(feature = "diagnostics")]
-        crate::copystat::add(crate::copystat::C::TexUploads, 1);
-        Some(Upload {
-            buffer,
-            bytes: self.bytes,
-            footprints: self.footprints.clone(),
-        })
+        crate::copystat::add(
+            if upload.is_some() {
+                crate::copystat::C::TexUploads
+            } else {
+                crate::copystat::C::TexSkipped
+            },
+            1,
+        );
+        upload
     }
     /// The title memory the texture is read from: address and bytes.
     pub(crate) fn memory(&self) -> (usize, usize) {
@@ -1056,6 +1096,13 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
 }
 
 /// The staging state of a title texture, made on first use.
+#[cfg(test)]
+pub(crate) fn snapshot_for_test(resource: This, texture: &ID3D12Resource) -> Option<Upload> {
+    let staging = staging(resource, texture)?;
+    staging.refresh();
+    staging.take_upload()
+}
+
 fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     use windows::core::Interface;
     // Pin the allocation before taking the staging table, not inside it:
@@ -1116,14 +1163,20 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         epoch: copy.epoch,
         demoted: copy.demoted,
         host_key: copy.texture.as_raw() as usize,
-        telemetry: crate::telemetry::Resource::new(crate::telemetry::Shape {
-            guest: resource as u64,
-            width: d.Width,
-            height: d.Height,
-            layers: d.DepthOrArraySize,
-            format: d.Format.0 as u32,
-            kind: "texture",
-        }),
+        telemetry: copy
+            .upload_telemetry
+            .get_or_init(|| {
+                Arc::new(crate::telemetry::Resource::new(crate::telemetry::Shape {
+                    guest: resource as u64,
+                    width: d.Width,
+                    height: d.Height,
+                    layers: d.DepthOrArraySize,
+                    format: d.Format.0 as u32,
+                    kind: "texture",
+                }))
+            })
+            .clone(),
+        upload_hashes: copy.upload_hashes.clone(),
         footprints,
         rows,
         layout,
