@@ -172,6 +172,10 @@ def main():
         'VICTORY_AMBIENT': args.ambient,
         'VICTORY_MATERIAL_DEPTH': args.material_depth,
         'VICTORY_INPUT': 'keyboard-mouse',
+        # Record the title's real pipeline states for the separate, resumable
+        # `victory warm --used` command. Recording does not compile them on
+        # the game thread and can be disabled for a clean A/B.
+        'VICTORY_PIPELINE_BOOK': os.environ.get('VICTORY_PIPELINE_BOOK', '1'),
         'VICTORY_CACHE_DIR': str(cache),
         'VICTORY_DATA_DIR': str(data),
         'VICTORY_GAME_DIR': str(game.parent),
@@ -193,7 +197,9 @@ def main():
                  'STARPORT_PARALLEL_WORK', 'STARPORT_WORKER_THREADS', 'STARPORT_XXH3', 'STARPORT_RETAINED_MIP_READS',
                  'STARPORT_TRIM_CACHES', 'STARPORT_EXPOSURE_WARNING', 'VICTORY_WIDE_BACK',
                  'VICTORY_CARD_REHASH_RUNS', 'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB',
-                 'VICTORY_HEAP_ROUND', 'VICTORY_KEYS'):
+                 'VICTORY_HEAP_ROUND', 'VICTORY_KEYS', 'VICTORY_PIPELINE_BOOK',
+                 'VICTORY_PIPELINE_WORKERS', 'VICTORY_PIPELINE_SLOW',
+                 'VICTORY_FULL_CARD_PASS', 'VICTORY_REUPLOAD_WHEN_FULL'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':
@@ -201,7 +207,7 @@ def main():
     if args.preset == 'throughput':
         # Relay's own default stage; do not accidentally override it with
         # LATE_WAIT=3 or enable diagnostic per-list GPU timing.
-        settings['VICTORY_RELAY'] = '2'
+        settings.update(VICTORY_RELAY='2', VICTORY_CARD_REHASH_RUNS='1')
     if args.capture:
         (run/'frames').mkdir()
         settings.update(VICTORY_CAPTURE=str(run/'frames'), VICTORY_CAPTURE_WORLD='1')

@@ -5,13 +5,16 @@ if not defined STARPORT_SERIES_S set "STARPORT_SERIES_S=1"
 rem Mip default: skip 2 on <=1080p, retain at least 3. --skip-mips 0 disables.
 rem STARPORT_SKIP_TOP_MIP=0/1 remains an explicit compatibility override.
 rem Renderer A/B commands and all defaults/kill switches: VERIFY.md and VERIFY2.md.
+rem Default performance profile: relay stage 2 + exact card rehash run joining.
+rem Pass --preset balanced to disable those two settings for an A/B.
 rem Pass 2 defaults: progressive tails=1, evictor V2=1, selfwrite=reset (safe compare).
 rem STARPORT_SKIP_MIPS_TARGET_DIM=1024 explicitly selects a 1024px streaming target; 0 restores fixed N.
 rem STARPORT_PARALLEL_WORK=0, STARPORT_XXH3=0, STARPORT_RETAINED_MIP_READS=0 restore old CPU paths.
 rem STARPORT_MEM_BUDGET_MB=8192/6144 also caps idle caches; STARPORT_TRIM_CACHES=0 disables that cap.
 rem STARPORT_BENCH=1 enables F8 30-second scene summaries. Lazy readback is not implemented.
-rem Current world comparison: --console series-x. No Series S hang fix claimed.
+rem Series S two-plane presentation is implemented with offline GPU coverage;
+rem its world behavior still requires your run. --console series-x remains the baseline.
 rem STARPORT_MAX_RES=0 disables the monitor ceiling; STARPORT_SKIP_MIPS=0 keeps all mips.
 rem STARPORT_LEGACY_RESIDENCY=1, STARPORT_DIRTY_TRACKING=0, STARPORT_FRAMES_IN_FLIGHT=1 restore conservative paths.
-python "%~dp0scripts\starport.py" --seconds 0 %*
+python "%~dp0scripts\starport.py" --seconds 0 --preset throughput %*
 pause

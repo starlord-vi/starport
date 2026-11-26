@@ -11,8 +11,9 @@ are recorded in [resource-pipeline validation](docs/resource-pipeline-validation
 
 These commands are for you to run from `A:\starport\port`, after the offline
 build. Close each run before starting the next command. Use Series X for this
-sequence; the Series S black-screen path has not been fixed. Keep the same
-save, camera and warmed shader cache, and collect at least 60 seconds and
+controlled sequence; Series S now has a two-plane compositor, but mixing that
+change into the residency baseline would confound the comparison. Keep the
+same save, camera and warmed shader cache, and collect at least 60 seconds and
 120 presented world frames in the same scene. Cold eviction needs 90 frames;
 at ~1 FPS this comparison needs over two minutes. The runner records flags
 in each run's settings/evidence.
@@ -102,11 +103,35 @@ $env:STARPORT_REBAR_UPLOAD = '1'
 .\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
 $env:STARPORT_REBAR_UPLOAD = '0'
 
-# Series S hang evidence only; no claim this fixes its boot path.
+# Separate Series S presentation check (not part of the Series X residency A/B).
 $env:STARPORT_WATCHDOG_STACKS = '1'
-.\Play-Starport.cmd --console series-s --preset balanced --ambient 0.6
+.\Play-Starport.cmd --console series-s --preset throughput --ambient 0.6
 $env:STARPORT_WATCHDOG_STACKS = '0'
 ```
+
+For that Series S check, the first valid two-plane frame should log
+`display output: compositing Series S scene and interface planes`. Verify both
+the world and interface are visible, the overlay alpha is correct, and motion
+does not bounce between plane sizes. Absence of the line means the title did
+not provide a valid second plane; an integer-only or denied-SRV overlay logs a
+fallback and intentionally presents the scene plane alone.
+
+After at least one run with the default `VICTORY_PIPELINE_BOOK=1`, the following
+CLI-only step precompiles only pipelines a prior run actually drew with. It
+does not launch the title and resumes after interruption:
+
+```powershell
+$env:VICTORY_CACHE_DIR = 'A:\starport\runtime\starport\cache'
+$env:VICTORY_DXIL = 'A:\starport\compat\tools_bin\dxc-1.9.2609\bin\x64\dxil.dll'
+$env:VICTORY_PC_DXC = 'A:\starport\compat\tools_bin\dxc-1.9.2609\bin\x64\dxc.exe'
+A:\starport\compat\starport_build\diag\victory.exe warm --used --jobs 8
+```
+
+Use the same backend build and driver for the next run. Set
+`VICTORY_PIPELINE_BOOK=0` to measure the small recording path directly,
+`VICTORY_PIPELINE_SLOW=0` to restore title creation order, or
+`VICTORY_PIPELINE_WORKERS=1..64` to override the conservative runtime worker
+count.
 
 To bisect, undo only the last changed variable: MAX_RES=0, SKIP_MIPS=0,
 FALLBACK_COLOR=black, LEGACY_RESIDENCY=1, DIRTY_TRACKING=0, or
@@ -267,6 +292,18 @@ DXGI statistics include other allocations; shared memory is not by itself a
 measurement of spilled textures. Lower shared usage and FPS gains require the
 user's controlled world run, not an offline assertion.
 
+When the local-card admission line is full, the bindless texture walk now
+holds up to 1,025 would-be new allocations and continues through later queued
+slots instead of stopping at the same 257th slot every frame. This is a
+fairness pass, not a larger budget. An already allocated texture may still be
+refreshed because that cannot create another host texture; slots held only by
+pressure wake immediately when room returns. Telemetry exposes
+`full_card_held_slots`, `full_card_reuploads` and `full_card_woken_slots`.
+Set `VICTORY_FULL_CARD_PASS=0` and `VICTORY_REUPLOAD_WHEN_FULL=0` separately to
+restore the old behavior for an A/B. A successful run should show the due
+backlog rotating/falling and nonzero full-card refreshes without higher live
+texture bytes.
+
 Offline integration coverage patches a real descriptor, checks requeueing,
 keeps a resource alive through CPU and recorded-list ownership, then releases
 it after reset and rejects an obsolete allocation generation. LRU ordering,
@@ -357,8 +394,13 @@ Optional `STARPORT_WATCHDOG_STACKS=1` requests the loader's existing stack
 dump helper, including title/main threads; default `0` avoids periodic thread
 suspension. The helper preallocates unwinding storage, resumes each thread
 before printing, and reports `module+rva`. No-present diagnostics cannot detect
-a continuously presented black image; a black Series S compositor path is
-not thereby diagnosed or fixed.
+a continuously presented black image. Series S presentation now validates both
+retail plane records (72-byte stride), scales the scene and interface planes to
+one output, and alpha-composites the premultiplied interface on the GPU. Invalid
+overlay resources fall back to the scene plane. Offline tests cover
+typed/typeless view selection, refused integer-only resources, scaling,
+blending and state restoration; only the user's run establishes title-specific
+correctness.
 
 For a separate comparison, keep `--console series-x` and set
 `STARPORT_MEM_BUDGET_MB=8192`. Unset/`0` disables the override. Accepted

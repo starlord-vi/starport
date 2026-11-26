@@ -31,8 +31,10 @@ Other proposals inspected but not applied:
 
 - ztrx PR 49: the proposed permlane lowering explicitly leaves inactive-source
   lane behavior incomplete; requires stronger semantics and execution coverage.
-- victory-fork PR 188: a much larger Series S compositor/upscaler change;
-  downloaded for review, not adopted or claimed working here.
+- victory-fork PR 188: that larger compositor/upscaler patch was downloaded
+  for review and was not copied. A later two-plane implementation from the
+  separately pinned cool_fox source below informed Starport's smaller,
+  independently integrated presentation path.
 - victory-fork PR 684 / commit
   `f6a09d3ba4ca425e71429ddbcb43b18ad507202a`: remapping every 32-bit integer
   typed-buffer view to its float counterpart was implemented and tested in
@@ -67,6 +69,46 @@ See [starport-residency.md](starport-residency.md) for exact changes,
 additional Starport lowering, offline evidence and the four unresolved
 NVIDIA Wave64 compute PSOs. No upstream assumption of a size-only descriptor's
 texture dimension or undefined dead-descriptor substitution was imported.
+
+## cool_fox performance and Series S review
+
+Reviewed the GPL-3 source at
+`https://git.gtahub.st/Mskh/codec-d--cool_fox-OPTIMIZED`, pinned locally at
+`808342e93a268ded13e67f4aca016214c6d3230d` as
+`research/coolfox-rtx3050-opt`. Starport selectively adapted the following
+exact revisions while preserving its NVIDIA Wave32, ambient, remap-lock,
+bounded-flight and residency work:
+
+- `b7ab9c49c035f5f7a26982e33a03d5f6314b8df7` (`local`): resumable pipeline
+  books and out-of-process offline warming. Starport makes child start or
+  incomplete output fatal, rolls back torn batch appends and includes its
+  translator settings plus the DXGI driver in the bad/completed fingerprint.
+- `a30829c4d245467d06df7aaebddc32f8fd954a82` (`local`): a separate bounded
+  lane for pipelines measured at one second or slower. Requested pipelines
+  remain first, and Starport retains a conservative default runtime worker
+  count with an explicit override.
+- `e05d4633a07340ccc89e82b1e3c64d2723ab0143` and
+  `1ad6e67aa28f9418764413bc242baeeeef00341c` (`codec_d`): Series S scene and
+  interface plane semantics and the corrected 72-byte retail-plane stride.
+  Starport did not copy the source compositor wholesale; it integrated safe
+  plane reads, resource-vtable validation, typed/typeless SRV checks,
+  premultiplied blending and state restoration into its existing bounded,
+  resolution-clamped presentation path.
+- `8dd30ab472697c47b141c273c2a00f8ce1c00520` and
+  `310c6eb6c16822ab95076aad61fce19bba86bb98` (`fxceless`): rotate would-be
+  new texture allocations behind a bounded full-card walk and refresh an
+  already allocated texture without growing VRAM. Starport adds explicit held
+  state, immediate wakeup when room returns, focused queue coverage and
+  telemetry, rather than importing the source's wider texture/upload system.
+
+The source's aggressive low-memory launcher values—especially a 512-pixel
+maximum texture dimension and small fixed pools—were rejected. Its own notes
+associate those settings with black/blocky close faces and shadows, which
+conflicts with Starport's visual-correctness goal. Upload-ahead, level-on-demand,
+thin-buffer, catch-up and broad thread-count switches were likewise not made
+defaults without isolated correctness and timing evidence. Upstream FPS claims
+remain upstream evidence; no Starport world-performance claim is made from
+offline tests.
 
 ## Sixteen-bit face-network buffers
 

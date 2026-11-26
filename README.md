@@ -13,7 +13,9 @@ Black/gooey surfaces and shadows remain reported. Four formerly failing pixel
 shaders now create host pipelines, but four Wave64 compute pipelines still fail
 on NVIDIA and the RT builder remains incomplete. Lighting, boats, usable world
 performance and 30/60 FPS gameplay are not solved. A separate Series S run at
-30 FPS exercised a menu/loading workload, not the world.
+30 FPS exercised a menu/loading workload, not the world. Starport now has a
+two-plane Series S presentation path with offline GPU readback coverage; it has
+not yet been validated in a user-run world scene.
 
 **Bring your own game files.** Executables, archives, shader dumps, captures,
 saves and caches stay outside this repository. The inherited format-table
@@ -47,18 +49,27 @@ workspace/
 
 The DXC path above is the runner's current expected layout; supply those DXC
 tools separately. From the repository, run `./Play-Starport.cmd`. It defaults
-to the Series S profile and keyboard/mouse controls, runs until you close the
-game and records lightweight diagnostics. Explicit options override the profile:
+to the Series S profile, the `throughput` preset and keyboard/mouse controls,
+runs until you close the game and records lightweight diagnostics. Throughput
+enables relay stage 2 and exact adjacent card-rehash run joining. Explicit
+options override the profile:
 
 ```powershell
 .\Play-Starport.cmd --console series-x --no-skip-top-mip
 .\Play-Starport.cmd --console series-s --skip-top-mip
+.\Play-Starport.cmd --console series-s --preset balanced
 ```
 
 `STARPORT_SERIES_S=0|1` changes the launcher's default console profile;
 `STARPORT_SKIP_MIPS=0..12` controls streaming mip omission (automatic default:
 2 at a display ceiling <=1080p, otherwise 0; at least 3 mips remain).
 `STARPORT_SKIP_TOP_MIP=0|1` remains an explicit alias for N=0|1.
+`VICTORY_PIPELINE_BOOK=1` is also enabled by the runner: it only records the
+pipeline states encountered, so they can be compiled outside the game later.
+Set it to `0` for a clean recording-overhead A/B. Full-card queue rotation and
+refreshing an already allocated texture are enabled by default;
+`VICTORY_FULL_CARD_PASS=0` and `VICTORY_REUPLOAD_WHEN_FULL=0` are their separate
+legacy kill switches.
 See [the ordered verification guide](VERIFY.md) for kill switches and comparisons.
 The [second-pass guide](VERIFY2.md) covers real mip tails, the V2 evictor,
 dimension targets, self-write filtering, bounded CPU workers and memory-cache
@@ -74,6 +85,23 @@ profile; the spoof does not force a particular resolution. Override `--game`,
 without a console option or environment flag, that runner defaults to Series X.
 See [residency and shader notes](docs/starport-residency.md) and
 [the audit patch notes](docs/starport-audit-patches.md) for presets and logging.
+
+After one or more user-run scenes have populated the pipeline book, precompile
+only pipelines actually used by those runs. This initializes D3D12 and compiler
+workers but does **not** launch the game:
+
+```powershell
+$env:VICTORY_CACHE_DIR = 'A:\starport\runtime\starport\cache'
+$env:VICTORY_DXIL = 'A:\starport\compat\tools_bin\dxc-1.9.2609\bin\x64\dxil.dll'
+$env:VICTORY_PC_DXC = 'A:\starport\compat\tools_bin\dxc-1.9.2609\bin\x64\dxc.exe'
+A:\starport\compat\starport_build\diag\victory.exe warm --used --jobs 8
+```
+
+The warmer is resumable and scopes completed/bad entries to the shader
+translator settings and installed graphics driver. Runtime compilation gives
+requested pipelines priority; known slow pipelines use a bounded worker lane.
+`VICTORY_PIPELINE_SLOW=0` restores creation order and
+`VICTORY_PIPELINE_WORKERS=1..64` overrides the runtime worker count.
 
 Game binaries are verified copies in a separate package view; archives are hard
 links. The runtime rejects mutations of the console's G: package drive. Native
@@ -139,11 +167,13 @@ and the four guarded Wave64 programs remain unchanged.
   immutable package opens, bounded runs, source/binary evidence and title-bar
   pending-pipeline counts.
 
-`--relay` enables the inherited experimental asynchronous submission settings;
-`--bvh` requests the inherited RT-builder path. Both remain opt-in pending local
-world measurements. Series S is now the launcher's default memory profile,
-but its world rendering and additional presentation/upscaler path remain
-unverified. Series X remains available for comparison.
+`--relay` explicitly enables the inherited asynchronous submission settings;
+`--bvh` requests the inherited RT-builder path and remains opt-in. The launcher
+throughput preset now selects relay stage 2 by default, while
+`--preset balanced` is its A/B kill switch. Series S is the launcher's default
+memory profile. Its two-plane presentation path has offline GPU coverage, but
+world rendering remains
+runtime-unverified. Series X remains available for comparison.
 
 Warm shader caches avoid repeated translation, but discrete GPU memory copies,
 readback merges and submission waits also need profiling. We do not shorten the
