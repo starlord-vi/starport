@@ -30,6 +30,21 @@ def outside(path, repo):
     return path
 
 
+def workspace_root(repo):
+    """Find the game workspace even when this checkout is a Git worktree."""
+    candidates = [repo.parent]
+    try:
+        common = Path(subprocess.check_output(
+            ['git', '-C', str(repo), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+            text=True).strip()).resolve()
+        if common.name == '.git':
+            candidates.append(common.parent.parent)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return next((root for root in candidates
+                 if (root/'exe').is_dir() and (root/'files').is_dir()), repo.parent)
+
+
 def package_view(exe, assets, state):
     package = state / 'package'
     package.mkdir(parents=True, exist_ok=True)
@@ -88,7 +103,7 @@ def summarize_frames(run):
 
 def main():
     repo = Path(__file__).resolve().parents[1]
-    root = repo.parent
+    root = workspace_root(repo)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--game', type=Path, default=root/'exe'/'game_scarlett_master.exe')
     parser.add_argument('--assets', type=Path, default=root/'files')
