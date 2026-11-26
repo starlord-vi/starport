@@ -193,7 +193,7 @@ def main():
                  'STARPORT_PARALLEL_WORK', 'STARPORT_WORKER_THREADS', 'STARPORT_XXH3', 'STARPORT_RETAINED_MIP_READS',
                  'STARPORT_TRIM_CACHES', 'STARPORT_EXPOSURE_WARNING', 'VICTORY_WIDE_BACK',
                  'VICTORY_CARD_REHASH_RUNS', 'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB',
-                 'VICTORY_KEYS'):
+                 'VICTORY_HEAP_ROUND', 'VICTORY_KEYS'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':

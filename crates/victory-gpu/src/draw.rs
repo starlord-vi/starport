@@ -330,6 +330,10 @@ pub(crate) static HEAP_VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// index ([`State::heap_buffers`]), and the microseconds they took.
 pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
+/// Descriptor-write notifications handled by those passes, and unchanged
+/// slots revisited by the periodic full pass.
+pub(crate) static HEAP_BUFFER_CHANGED_SLOTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_BUFFER_PERIODIC_SLOTS: AtomicU64 = AtomicU64::new(0);
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -342,6 +346,20 @@ pub(crate) static HEAP_TEXTURES_FULL: AtomicU64 = AtomicU64::new(0);
 /// Times a placed texture's slot was passed over because its memory is not
 /// mapped.
 pub(crate) static HEAP_TEXTURES_AWAY: AtomicU64 = AtomicU64::new(0);
+
+fn parse_heap_round(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|round| (1..=1024).contains(round))
+        .unwrap_or(16)
+}
+
+/// How often a bindless-buffer pass revisits unchanged view-heap slots.
+/// Changed slots are still handled by the next pass regardless of this value.
+pub(crate) fn heap_round() -> u64 {
+    static ROUND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *ROUND.get_or_init(|| parse_heap_round(std::env::var("VICTORY_HEAP_ROUND").ok().as_deref()))
+}
 /// Slots the pass found up to date already: their texture is uploaded by
 /// the draws that read it through a table (it has a staging buffer).
 pub(crate) static HEAP_TEXTURES_TABLED: AtomicU64 = AtomicU64::new(0);
@@ -1494,7 +1512,8 @@ impl State {
         // Per host heap: the host copy and range each slot's buffer view
         // reads, kept from pass to pass. Only the slots written since the
         // last pass are looked at again (83,000 slots a pass otherwise, 0.1 s
-        // at best); all of them every 16 passes, because a view of a
+        // at best); all of them periodically (every 16 passes by default),
+        // because a view of a
         // released resource goes stale without a write, and a slot written
         // before its memory had a host copy is only made then.
         type Ranges =
@@ -1507,13 +1526,20 @@ impl State {
             .entry(std::ptr::from_ref(host) as usize)
             .or_insert_with(|| (0, Ranges::new()));
         let changed = host.buffer_changes();
-        let slots = if *passes % 16 == 0 {
+        let changed_notifications = changed.len();
+        let full = (*passes).is_multiple_of(heap_round());
+        let (slots, periodic_unchanged) = if full {
             ranges.clear();
-            host.buffer_slots()
+            let changed: std::collections::HashSet<u32> = changed.into_iter().collect();
+            let slots = host.buffer_slots();
+            let periodic_unchanged = slots.iter().filter(|slot| !changed.contains(slot)).count();
+            (slots, periodic_unchanged)
         } else {
-            changed
+            (changed, 0)
         };
         *passes += 1;
+        HEAP_BUFFER_CHANGED_SLOTS.fetch_add(changed_notifications as u64, Ordering::Relaxed);
+        HEAP_BUFFER_PERIODIC_SLOTS.fetch_add(periodic_unchanged as u64, Ordering::Relaxed);
         // Whether the device was there before the pass: a view that removes
         // it is named below.
         static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2993,4 +3019,21 @@ pub(crate) fn stencil_ref(list: &HostList, reference: u32) {
     });
     // SAFETY: an open list.
     unsafe { list.list.OMSetStencilRef(reference) };
+}
+
+#[cfg(test)]
+mod heap_round_tests {
+    use super::parse_heap_round;
+
+    #[test]
+    fn heap_round_is_bounded_and_keeps_the_established_default() {
+        assert_eq!(parse_heap_round(None), 16);
+        assert_eq!(parse_heap_round(Some("")), 16);
+        assert_eq!(parse_heap_round(Some("0")), 16);
+        assert_eq!(parse_heap_round(Some("32")), 32);
+        assert_eq!(parse_heap_round(Some(" 64 ")), 64);
+        assert_eq!(parse_heap_round(Some("1024")), 1024);
+        assert_eq!(parse_heap_round(Some("1025")), 16);
+        assert_eq!(parse_heap_round(Some("nope")), 16);
+    }
 }
