@@ -1045,15 +1045,54 @@ fn pooled(n: usize) -> Vec<u8> {
 fn give_back(v: Vec<u8>) {
     const KEPT: usize = 512 << 20;
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    let before = pool.iter().map(|v| v.capacity()).sum::<usize>() + v.capacity();
     pool.push(v);
+    trim_snapshots(
+        &mut pool,
+        crate::memtrim::snapshots(KEPT as u64) as usize,
+        crate::memtrim::active(),
+    );
+    if crate::memtrim::active() {
+        let after = pool.iter().map(|v| v.capacity()).sum::<usize>();
+        crate::memtrim::released(0, before.saturating_sub(after) as u64);
+    }
+}
+
+fn trim_snapshots(pool: &mut Vec<Vec<u8>>, cap: usize, strict: bool) {
     pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
     pool.truncate(8);
     let (mut seen, mut total) = (0, 0usize);
     pool.retain(|v| {
         seen += 1;
-        total = total.saturating_add(v.capacity());
-        seen == 1 || total <= KEPT
+        if strict {
+            if v.capacity() > cap.saturating_sub(total) {
+                return false;
+            }
+            total += v.capacity();
+            true
+        } else {
+            total = total.saturating_add(v.capacity());
+            seen == 1 || total <= cap
+        }
     });
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::*;
+    #[test]
+    fn strict_snapshot_cap_rejects_oversized_largest_and_keeps_smaller_fits() {
+        let mut pool = vec![
+            Vec::with_capacity(1000),
+            Vec::with_capacity(100),
+            Vec::with_capacity(200),
+        ];
+        trim_snapshots(&mut pool, 350, true);
+        assert_eq!(pool.iter().map(|v| v.capacity()).sum::<usize>(), 300);
+        let mut old = vec![Vec::with_capacity(1000)];
+        trim_snapshots(&mut old, 350, false);
+        assert_eq!(old[0].capacity(), 1000);
+    }
 }
 
 const NOT_WATCHED: u8 = 2;
@@ -1752,13 +1791,13 @@ static KEPT_BYTES: AtomicU64 = AtomicU64::new(0);
 /// memory in 27 s; kept snapshots are the PC's memory, all of it resident).
 fn kept_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *MOST.get_or_init(|| {
+    crate::memtrim::snapshots(*MOST.get_or_init(|| {
         std::env::var("VICTORY_KEEP_SNAPSHOTS_MB")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .unwrap_or(256)
             << 20
-    })
+    }))
 }
 
 /// The 64 KiB pieces, cut at multiples of 64 KiB of title memory, that

@@ -19,6 +19,7 @@ mod allocstat;
 #[cfg(windows)]
 mod ambient;
 mod ambient_trace;
+mod memtrim;
 mod perf;
 mod progressive;
 #[cfg(test)]

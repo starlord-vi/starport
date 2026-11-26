@@ -42,6 +42,12 @@ fn selected() -> Color {
             tracing::warn!(value=asked,"invalid fallback color; retaining black null views");Color::Black
         });
         tracing::info!(target:"starport::fallback",?color,"missing texture SRV diagnostic; black restores original null behavior; UAVs remain null");
+        if matches!(color,Color::Grey|Color::White)
+            && std::env::var_os("STARPORT_EXPOSURE_WARNING").is_none_or(|v| v!="0")
+            && let Some(ambient)=crate::ambient::level().filter(|v|*v>0.3) {
+            tracing::warn!(target:"starport::fallback",?color,ambient,
+                "bright diagnostic fallback with ambient above 0.3 can overexpose surfaces; compare real textures before judging lighting");
+        }
         color
     })
 }

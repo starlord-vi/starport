@@ -169,6 +169,7 @@ fn sweep() {
     crate::texture::let_go_idle();
     crate::resource::let_go_idle();
     crate::residency::sweep();
+    crate::memtrim::report();
 }
 
 /// Drops `object` once every submission running now has finished: at once
@@ -1487,7 +1488,7 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
         let mut spare = SPARE.lock().unwrap_or_else(|e| e.into_inner());
         for (chunk, size) in chunks {
             let back = if scratch_pool() {
-                spare.give(chunk, size, SPARE_MOST)
+                spare.give(chunk, size, crate::memtrim::uploads(SPARE_MOST))
             } else {
                 Some(chunk)
             };
@@ -1497,6 +1498,9 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
                     ALIVE[4].fetch_add(size, Ordering::Relaxed);
                 }
                 Some(chunk) => {
+                    if crate::memtrim::active() {
+                        crate::memtrim::released(1, size);
+                    }
                     ALIVE[1].fetch_sub(1, Ordering::Relaxed);
                     ALIVE[2].fetch_sub(size, Ordering::Relaxed);
                     freed.push(chunk);

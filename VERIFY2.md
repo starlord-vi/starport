@@ -211,7 +211,40 @@ No translator behavior changed; unsupported descriptor operations still fail
 with their shader diagnostic. Hard-coded title texel coordinates still need
 visual comparison. Check target logs, live-byte histogram and the same F8 scene.
 
-## Task 4a: stop self-merge re-upload notices
+## Stage 4: memory budget and disposable staging caches
+
+After task 3, compare these in order, restarting and using F8 each time:
+
+```powershell
+$env:STARPORT_TRIM_CACHES = '1'
+$env:STARPORT_MEM_BUDGET_MB = '8192'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+# Then repeat the identical scene with:
+$env:STARPORT_MEM_BUDGET_MB = '6144'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+TRIM_CACHES defaults to 1; 0 restores the previous cache caps independently
+of the reported title budget. With MEM_BUDGET_MB unset/0 there is no new cache
+limit. At 8192 MiB the idle CPU snapshot pool is capped at 128 MiB and idle
+upload chunks at 64 MiB; at 6144 they are capped at 96/48 MiB. An oversized
+snapshot is no longer exempt from that strict cap. Admission of optional kept
+snapshots uses the same ceiling. Resources held by lists/fences are preserved;
+upload chunks enter the pool only after the existing completion/reset path.
+
+`starport::cache_budget` logs these limits and cumulative released bytes.
+Those are deallocations, not a claim of equivalent immediate working-set or
+DXGI reduction. Private allocator/driver retention remains measurable only
+through memory telemetry. Lower caps may increase allocation/copy time.
+
+The title budget queries remain consistent. Native physical sections already
+reserve their full size and commit when mapped/written on Windows. **No new
+guest commit cap or demand-commit fault handler is implemented**: a mapped or
+live guest page cannot be discarded just because the reported budget fell.
+Changing those contracts needs the managed alias/allocation work described
+below. RAM below 85% therefore remains a user-run target, not an offline result.
+
+## Stage 5 / task 4a: stop self-merge re-upload notices
 
 For a separate comparison after the preceding texture changes:
 
@@ -304,3 +337,37 @@ New library dependencies are pinned by Cargo.lock: Rayon 1.12.0 (rayon-core
 1.13.0, MIT OR Apache-2.0; [source](https://github.com/rayon-rs/rayon)) and
 xxhash-rust 0.8.21 (BSL-1.0; [source](https://github.com/DoumanAsh/xxhash-rust)).
 These are dependency uses, with no copied upstream renderer implementation.
+
+## Optional diagnostic warning
+
+STARPORT_EXPOSURE_WARNING defaults to 1; 0 disables a one-time warning when
+grey/white fallback SRVs are selected with VICTORY_AMBIENT above 0.3. It does
+not change either the fallback pixels or the ambient shader/level. Use black
+for the controlled comparisons; grey remains useful only to identify missing
+texture sampling.
+
+## Read the comparisons together
+
+Keep the same save, camera, cache, resolution, ambient and draw workload. The
+requested order is baseline, progressive, V2+target1024, memory8192/6144,
+selfwrite, then CPU workers/hash/mip reads. Lazy/adaptive readback and genuine
+buffer FIF overlap remain unavailable; skip those two requested A/B stages.
+Do not interpret an ignored env var as a successful async test.
+
+For every F8 capture, keep bench.json together with settings/console logs.
+Compare median/p95 frame/preparing/fence/copy-back and subphase times, recorded
+draws, eviction/overwrite counts, waiting_texture_slots and due/partial/unmapped,
+tail_bytes/tail_allocations/promoted_textures, dirty_reupload_bytes,
+selfwrite_checked/equal/forwarded bytes, merge-scan bytes per frame, tracked
+live bytes, DXGI local/non-local Budget/CurrentUsage, physical available RAM
+and process private commit. Existing periodic counters supplement the phase
+JSON; cumulative byte counts must be differenced over the same interval.
+
+Desired user-run signals: real blurry content, fewer waiting slots, reduced
+repeat uploads, lower shared GPU usage, RAM below 85%, and <=400 ms/frame
+(<=200 stretch). A >=70% copy-back reduction is still a target for future
+demand readback, not an effect established by the self-write upload filter.
+If the new data shows translation dominating preparing, the next CPU change
+should be a bounded reuse cache for validated immutable command/descriptor
+translations, invalidated by descriptor generation, source mapping and PSO
+changes; first isolate its cost from hashing and merge scans with these timers.

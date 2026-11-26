@@ -48,7 +48,7 @@ impl Console {
 
 static SERIES_S: AtomicBool = AtomicBool::new(false);
 
-fn memory_override() -> Option<usize> {
+pub(crate) fn memory_override() -> Option<usize> {
     static LIMIT: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
         let value = std::env::var("STARPORT_MEM_BUDGET_MB").ok()?;
