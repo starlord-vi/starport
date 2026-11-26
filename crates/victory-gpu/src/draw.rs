@@ -343,6 +343,11 @@ pub(crate) static HEAP_TEXTURES_WAITING: AtomicU64 = AtomicU64::new(0);
 /// Passes that made no texture because the card had no room
 /// (`crate::resource::room`), for the memory line.
 pub(crate) static HEAP_TEXTURES_FULL: AtomicU64 = AtomicU64::new(0);
+/// New-allocation slots rotated behind a bounded full-card pass, existing
+/// textures refreshed without growing VRAM, and held slots woken by room.
+pub(crate) static HEAP_TEXTURES_HELD: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_TEXTURES_REUPLOADED_FULL: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HEAP_TEXTURES_WOKEN: AtomicU64 = AtomicU64::new(0);
 /// Times a placed texture's slot was passed over because its memory is not
 /// mapped.
 pub(crate) static HEAP_TEXTURES_AWAY: AtomicU64 = AtomicU64::new(0);
@@ -359,6 +364,22 @@ fn parse_heap_round(value: Option<&str>) -> u64 {
 pub(crate) fn heap_round() -> u64 {
     static ROUND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *ROUND.get_or_init(|| parse_heap_round(std::env::var("VICTORY_HEAP_ROUND").ok().as_deref()))
+}
+
+/// Keep walking a bounded texture queue while the card is full so the same
+/// first 257 new allocations cannot permanently hide stale/reclaimable work.
+/// `VICTORY_FULL_CARD_PASS=0` restores the old early stop.
+fn full_card_pass() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FULL_CARD_PASS").is_none_or(|v| v != "0"))
+}
+
+/// Refresh an already allocated texture while the card is full. This stages
+/// new contents but cannot create a second host texture. The kill switch is
+/// retained for direct A/B diagnosis.
+fn reupload_when_full() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_REUPLOAD_WHEN_FULL").is_none_or(|v| v != "0"))
 }
 /// Slots the pass found up to date already: their texture is uploaded by
 /// the draws that read it through a table (it has a staging buffer).
@@ -1704,6 +1725,8 @@ impl State {
         if !room {
             HEAP_TEXTURES_FULL.fetch_add(1, Ordering::Relaxed);
             once!("textures picked by index: the card has no room for more; they wait");
+        } else {
+            HEAP_TEXTURES_WOKEN.fetch_add(host.texture_slots_room(frame) as u64, Ordering::Relaxed);
         }
         let mut refused = 0;
         // Slots whose texture's memory the runtime mapped, unmapped or
@@ -1798,19 +1821,30 @@ impl State {
             }
             // From here on a host texture is made: not without room. The
             // slot stays due.
-            let tail_admission = crate::progressive::enabled() && heap.handle(index)
-                .and_then(crate::descriptor::view)
-                .is_some_and(|view| matches!(view, View::Placed(false, words, _) if crate::resource::progressive_words(&words)));
+            let handle = heap.handle(index);
+            let tail_admission = crate::progressive::enabled()
+                && handle
+                    .and_then(crate::descriptor::view)
+                    .is_some_and(|view| matches!(view, View::Placed(false, words, _) if crate::resource::progressive_words(&words)));
             if !room && !tail_admission {
-                refused += 1;
-                if refused > 256 {
-                    break;
+                let already_made = reupload_when_full()
+                    && handle.is_some_and(|handle| host.texture_slot_made_from(index, handle));
+                if !already_made {
+                    refused += 1;
+                    if full_card_pass() {
+                        host.texture_slot_held(index, write, frame + most);
+                        HEAP_TEXTURES_HELD.fetch_add(1, Ordering::Relaxed);
+                        if refused > 1024 {
+                            break;
+                        }
+                    } else if refused > 256 {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+                HEAP_TEXTURES_REUPLOADED_FULL.fetch_add(1, Ordering::Relaxed);
             }
-            let view = heap
-                .handle(index)
-                .and_then(|handle| host.mirror(index, handle, true));
+            let view = handle.and_then(|handle| host.mirror(index, handle, true));
             let placed = view
                 .as_ref()
                 .and_then(crate::descriptor::host::placed_texture);

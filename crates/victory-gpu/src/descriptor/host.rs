@@ -483,6 +483,10 @@ struct Waiting {
     /// Bytes of its memory that were mapped when it was last uploaded
     /// without all of it there; 0: not uploaded yet.
     mapped: u64,
+    /// The slot needs a new host texture but the card was full. Unlike a
+    /// failed memory look this does not make it jump ahead of fresh writes;
+    /// room returning wakes it immediately.
+    held: bool,
 }
 
 /// The queue of title slots whose texture view waits to be brought up to
@@ -492,6 +496,7 @@ struct Waiting {
 pub(crate) struct TextureQueue {
     slots: std::collections::BTreeMap<u32, Waiting>,
     writes: u64,
+    held: usize,
 }
 
 impl TextureQueue {
@@ -503,6 +508,9 @@ impl TextureQueue {
         if seen && self.slots.contains_key(&index) {
             return;
         }
+        if self.slots.get(&index).is_some_and(|w| w.held) {
+            self.held -= 1;
+        }
         self.writes += 1;
         let write = self.writes;
         self.slots.insert(
@@ -513,12 +521,15 @@ impl TextureQueue {
                 write,
                 looks: 0,
                 mapped: 0,
+                held: false,
             },
         );
     }
 
     fn remove(&mut self, index: u32) {
-        self.slots.remove(&index);
+        if self.slots.remove(&index).is_some_and(|w| w.held) {
+            self.held -= 1;
+        }
     }
 
     /// Up to `max` slots due at `frame`, each with its write number, in
@@ -535,7 +546,7 @@ impl TextureQueue {
         let mut again: Vec<(u64, u32, u64)> = Vec::new();
         let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
         for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame) {
-            let class = if w.looks > 0 || w.mapped > 0 {
+            let class = if !w.held && (w.looks > 0 || w.mapped > 0) {
                 &mut again
             } else {
                 &mut fresh
@@ -570,26 +581,64 @@ impl TextureQueue {
 
     /// Slot `index` is up to date: out of the queue until written again.
     fn done(&mut self, index: u32, write: u64) {
-        if self.same(index, write).is_some() {
-            self.slots.remove(&index);
+        if self.slots.get(&index).is_some_and(|w| w.write == write)
+            && self.slots.remove(&index).is_some_and(|w| w.held)
+        {
+            self.held -= 1;
         }
     }
 
     /// Nothing to upload at slot `index` now: looked at again after 1, 2,
     /// 4, ... frames, at most `most`.
     fn later(&mut self, index: u32, write: u64, frame: u64, most: u64) {
+        let was_held = self
+            .slots
+            .get(&index)
+            .is_some_and(|w| w.write == write && w.held);
         if let Some(w) = self.same(index, write) {
             w.due = frame + (1u64 << w.looks.min(16)).min(most.max(1));
             w.looks = w.looks.saturating_add(1);
+            w.held = false;
         }
+        self.held -= usize::from(was_held);
+    }
+
+    /// A slot which would need a new card allocation is moved behind the
+    /// current full-card pass instead of leaving every later slot starved.
+    fn hold(&mut self, index: u32, write: u64, due: u64) {
+        let mut newly_held = false;
+        if let Some(w) = self.same(index, write) {
+            w.due = due;
+            newly_held = !w.held;
+            w.held = true;
+        }
+        self.held += usize::from(newly_held);
+    }
+
+    /// New allocations are possible again: retry all slots held solely by
+    /// card pressure now. Returns how many were woken.
+    fn room(&mut self, frame: u64) -> usize {
+        if self.held == 0 {
+            return 0;
+        }
+        for w in self.slots.values_mut().filter(|w| w.held) {
+            w.held = false;
+            w.due = w.due.min(frame);
+        }
+        std::mem::take(&mut self.held)
     }
 
     /// Slot `index` was uploaded with `mapped` bytes of its memory there,
     /// not all of it: looked at again from frame `due`.
     fn partly(&mut self, index: u32, write: u64, due: u64, mapped: u64) {
+        let was_held = self
+            .slots
+            .get(&index)
+            .is_some_and(|w| w.write == write && w.held);
         if let Some(w) = self.same(index, write) {
-            (w.due, w.looks, w.mapped) = (due, 0, mapped.max(1));
+            (w.due, w.looks, w.mapped, w.held) = (due, 0, mapped.max(1), false);
         }
+        self.held -= usize::from(was_held);
     }
 
     /// The memory slot `index`'s texture lies in was mapped, unmapped or
@@ -597,6 +646,9 @@ impl TextureQueue {
     /// written now, whatever was known of it (a pass at work on it does
     /// not take it out).
     fn changed(&mut self, index: u32, frame: u64, due: u64) {
+        if self.slots.get(&index).is_some_and(|w| w.held) {
+            self.held -= 1;
+        }
         self.writes += 1;
         let write = self.writes;
         let due = self.slots.get(&index).map_or(due, |w| w.due.min(due));
@@ -608,6 +660,7 @@ impl TextureQueue {
                 write,
                 looks: 0,
                 mapped: 0,
+                held: false,
             },
         );
     }
@@ -1074,6 +1127,44 @@ impl HostHeap {
     pub(crate) fn texture_slot_later(&self, index: u32, write: u64, frame: u64, most: u64) {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         textures.later(index, write, frame, most);
+    }
+
+    /// The card has no room for a new host copy: defer this slot while the
+    /// bounded pass examines later slots that may release or reuse memory.
+    pub(crate) fn texture_slot_held(&self, index: u32, write: u64, due: u64) {
+        let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
+        textures.hold(index, write, due);
+    }
+
+    /// New card allocations are possible again; wake slots deferred only by
+    /// card pressure instead of making them wait for their fallback deadline.
+    pub(crate) fn texture_slots_room(&self, frame: u64) -> usize {
+        self.textures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .room(frame)
+    }
+
+    /// Whether slot `index` already shows exactly the view at `handle`. Its
+    /// contents can be refreshed while the card is full without allocating a
+    /// second host texture.
+    pub(crate) fn texture_slot_made_from(&self, index: u32, handle: u64) -> bool {
+        if index >= self.count {
+            return false;
+        }
+        // SAFETY: callers pass a title descriptor handle already accepted by
+        // `Heap::handle`; reading its three unaligned identity words is the
+        // same operation used by `mirror` below.
+        let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        if tag != VIEW_TAG {
+            return false;
+        }
+        let key = u64::from(generation) << 32 | u64::from(i);
+        self.made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(index as usize)
+            .is_some_and(|&made| made == key && made != 0)
     }
 
     /// Bytes of title slot `index`'s memory that were mapped when it was
@@ -3036,6 +3127,22 @@ mod tests {
         q.written(98, 14, 16, false);
         assert!(!q.due(15, 100).iter().any(|d| d.0 == 98));
         assert!(q.due(16, 100).iter().any(|d| d.0 == 98));
+
+        // Full-card deferral rotates a new allocation behind other fresh
+        // writes without misclassifying it as an unmapped-memory retry. Room
+        // returning wakes it before the fallback deadline.
+        let w14 = write(&q, 14);
+        q.hold(14, w14, 40);
+        assert_eq!(q.held, 1);
+        assert!(!q.due(39, 100).iter().any(|d| d.0 == 14));
+        assert_eq!(q.census(39)[2], 0);
+        assert_eq!(q.room(20), 1);
+        assert_eq!(q.held, 0);
+        assert!(q.due(20, 100).iter().any(|d| d.0 == 14));
+        assert_eq!(q.room(20), 0);
+        q.hold(14, w14, 40);
+        q.written(14, 21, 21, false);
+        assert_eq!(q.held, 0);
     }
 
     /// A view written over memory that older views describe otherwise
