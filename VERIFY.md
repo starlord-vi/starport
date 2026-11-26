@@ -510,3 +510,18 @@ The throughput preset does not yet change this default.
 buffer-window path for memory A/B tests. Sized reads keep their complete
 ranges; unsized root reads retain the full tail of their 4 MiB cell. Defaults
 remain unchanged until a runtime comparison establishes correctness.
+
+## CPU descriptor copies
+
+`VICTORY_HEAP_SYNC=1` (default) discovers descriptor records copied directly
+into shader-visible heaps. Those writes bypass descriptor API entry points.
+The pass uses the existing shared dirty-page journal, keeps a separate cursor
+per heap and compares kernel-read snapshots of the three identity words.
+Untracked allocations are conservatively scanned whole. Failed reads remain
+pending; capped-out title slots never overwrite host dynamic-table slots.
+Synchronization runs before the bindless-buffer/texture pass and submission.
+`VICTORY_HEAP_SYNC=0` restores the prior path for A/B diagnosis.
+
+`starport::descriptors` logs pages scanned, changed/mirrored records and CPU
+time per frame. This timing overlaps preparing and heap-buffer timing.
+No executable store hooks or reduced-frequency fallback are used.

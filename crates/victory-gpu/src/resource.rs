@@ -3094,12 +3094,17 @@ mod tests {
                 drop(patch);
                 assert!(host_heap.resident_resources().contains(&key));
             });
+            // Other GPU regressions submit concurrently and can run the
+            // automatic promoter. Keep a CPU lease until the submission
+            // lock protects our explicit transaction below.
+            let promotion_lease = host_resource(image).unwrap();
             assert_eq!(
                 unsafe { VirtualAlloc(at as _, size, MEM_COMMIT, PAGE_READWRITE) } as usize,
                 at
             );
             unsafe { std::ptr::write_bytes(at as *mut u8, 0x3c, size) };
             crate::host::idle_for_test(|| {
+                drop(promotion_lease);
                 let patch = crate::descriptor::host::patch_for_promotion(key, 0).unwrap();
                 assert!(promote_tail(image as usize, key, epoch));
                 drop(patch);

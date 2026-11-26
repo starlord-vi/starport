@@ -1552,6 +1552,10 @@ impl State {
             return Some(gpu);
         }
         let started = std::time::Instant::now();
+        // A bindless material can name a slot the title copied with a CPU
+        // store rather than a descriptor API call. Discover it before
+        // collecting buffer changes and pending streaming textures.
+        heap.sync_copied(host);
         // Per host heap: the host copy and range each slot's buffer view
         // reads, kept from pass to pass. Only the slots written since the
         // last pass are looked at again (83,000 slots a pass otherwise, 0.1 s

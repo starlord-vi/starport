@@ -11,7 +11,11 @@ use crate::object::{self, DESCRIPTOR_HEAP, E_INVALIDARG, HRESULT, Iid, Object, T
 use crate::resource::{Memory, PAGEABLE_IIDS};
 
 #[cfg(windows)]
+mod copied;
+#[cfg(windows)]
 pub(crate) mod host;
+#[cfg(windows)]
+pub(crate) use copied::{line as copied_line, sync_heaps};
 
 const HEAP_IIDS: [Iid; 4] = [
     guid(
@@ -59,6 +63,10 @@ pub(crate) struct Heap {
     host: std::sync::OnceLock<Option<std::sync::Arc<host::HostHeap>>>,
     #[cfg(windows)]
     pending: std::sync::Mutex<Vec<u32>>,
+    /// Independent cursor in the shared dirty-page journal. Raw title
+    /// copies do not call our descriptor creation/copy entry points.
+    #[cfg(windows)]
+    copied: std::sync::Arc<std::sync::Mutex<copied::Copied>>,
 }
 
 pub(crate) fn heap<'a>(this: This) -> &'a Heap {
@@ -129,6 +137,17 @@ impl Heap {
     pub(crate) fn retained_host(&self) -> Option<std::sync::Arc<host::HostHeap>> {
         self.host()?;
         self.host.get()?.clone()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn sync_copied(&self, host: &host::HostHeap) {
+        copied::sync(
+            self.start,
+            self.desc.count,
+            increment(self.desc.kind).unwrap_or(32),
+            &self.copied,
+            host,
+        );
     }
 
     /// The handle of descriptor `index` of this heap.
@@ -1001,6 +1020,8 @@ pub(crate) extern "system" fn create_heap(
         host: std::sync::OnceLock::new(),
         #[cfg(windows)]
         pending: Default::default(),
+        #[cfg(windows)]
+        copied: Default::default(),
     });
     #[cfg(windows)]
     if visible {

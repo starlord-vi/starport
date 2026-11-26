@@ -1678,7 +1678,22 @@ impl HostHeap {
             return None;
         }
         // SAFETY: the handle is a descriptor slot in title memory.
-        let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        let record = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        self.mirror_record(index, handle, record, for_draw)
+    }
+
+    /// Mirror a kernel-read snapshot, without dereferencing guest memory a
+    /// second time. A placed descriptor page may have been unmapped since.
+    pub(crate) fn mirror_record(
+        &self,
+        index: u32,
+        handle: u64,
+        [tag, i, generation]: [u32; 3],
+        for_draw: bool,
+    ) -> Option<View> {
+        if index >= self.count {
+            return None;
+        }
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
@@ -1690,10 +1705,10 @@ impl HostHeap {
                 made[index as usize] = 0;
                 self.make_null(index);
                 let _ = self.note_buffer(index, None, false);
-            } else if for_draw {
-                // Left for later and stale since: out of the sets and the stride table.
-                let _ = self.note_buffer(index, None, false);
             }
+            // A raw CPU copy can clear a deferred slot before it was ever
+            // made. Retire its queue/stride entry even with no host key.
+            let _ = self.note_buffer(index, None, false);
             return None;
         };
         if made[index as usize] != key {
