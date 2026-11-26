@@ -73,3 +73,14 @@ path needed here: fixed descriptor places are identified during lowering,
 views are isolated in fresh descriptor tables, and shader-cache serialization
 records the places. The commit's unrelated indirect-draw, query, device,
 occlusion and SDWA changes were not imported.
+
+## Thirty-two-bit typed-buffer values
+
+Selectively adapted the typed-buffer format correction from
+`fxceless/victory-fork` commit
+`f6a09d3ba4ca425e71429ddbcb43b18ad507202a` (GPL-3.0-or-later, pull request
+684). Integer typed-buffer descriptors use their same-layout float DXGI format
+because Starport's translated typed loads and stores declare float channels;
+this preserves packed bits instead of invoking numeric conversion. The source
+commit's texture worker, reaper, streaming experiments, skin-bake changes and
+instrumentation were not imported.
