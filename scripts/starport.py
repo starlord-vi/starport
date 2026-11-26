@@ -12,7 +12,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 
 def sha256(path):
@@ -28,6 +30,53 @@ def outside(path, repo):
     if path.is_relative_to(repo):
         raise ValueError(f'Game files and generated data must stay outside {repo}: {path}')
     return path
+
+
+def configure_fsr(data, mode):
+    """Use the title's native rendering path; retain exact-byte XML backups."""
+    result = dict(mode=mode, files=[])
+    if mode == 'preserve':
+        return result
+    for path in sorted(data.glob('*/storage/settings/settings.xml')):
+        original = path.read_bytes()
+        entries = ET.fromstring(original).findall('./graphics/fsrQuality')
+        pattern = rb'(<fsrQuality\b[^>]*\bvalue\s*=\s*)([\x22\x27])([^\x22\x27]*)(\2)'
+        matches = list(re.finditer(pattern, original))
+        if len(entries) != 1 or len(matches) != 1:
+            raise ValueError(f'Expected exactly one graphics/fsrQuality setting: {path}')
+        previous = entries[0].get('value')
+        if previous is None or not previous.isdecimal():
+            raise ValueError(f'Invalid fsrQuality setting: {path}')
+        record = dict(path=str(path), previous=previous, value='0', changed=previous != '0')
+        if previous != '0':
+            updated = re.sub(pattern, lambda m: m[1] + m[2] + b'0' + m[4], original)
+            backup = path.with_name(f'{path.name}.starport-fsr-{hashlib.sha256(original).hexdigest()[:16]}.bak')
+            if backup.exists():
+                if backup.read_bytes() != original:
+                    raise ValueError(f'Settings backup differs: {backup}')
+            else:
+                with backup.open('xb') as stream:
+                    stream.write(original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            record['backup'] = str(backup)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=path.parent, prefix='starport-settings-',
+                                                 suffix='.tmp', delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(updated)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            print(f'Native rendering: fsrQuality {previous} -> 0; backup: {backup}', flush=True)
+        result['files'].append(record)
+    if not result['files']:
+        print('Native rendering: no saved settings.xml yet; FSR preset could not be applied.', flush=True)
+    return result
 
 
 def workspace_root(repo):
@@ -121,6 +170,10 @@ def main():
                         help='Compatibility alias for --skip-mips 1; --no-skip-top-mip means 0')
     parser.add_argument('--skip-mips', type=int, choices=range(13), help='Omit N top streaming mips; 0 disables; default automatic')
     parser.add_argument('--capture', action='store_true', help='Diagnostic PNG captures; perturbs timings')
+    parser.add_argument('--capture-targets', action='store_true',
+                        help='With --capture, dump intermediate render/depth/UAV targets on selected world frames; very slow')
+    parser.add_argument('--fsr', choices=('off', 'preserve'), default='off',
+                        help='Default off: set saved fsrQuality to 0 with a backup; preserve leaves settings untouched')
     parser.add_argument('--capture-every', type=int, help='Dense native captures every N presents; requires --capture')
     parser.add_argument('--data', type=Path, help='Separate test profile; existing saves are preserved')
     parser.add_argument('--cache', type=Path, help='Shared shader cache for controlled profile comparisons')
@@ -150,6 +203,8 @@ def main():
         parser.error('--ambient must be off or a finite number from 0 to 16')
     if args.capture_every is not None and (not args.capture or args.capture_every < 1):
         parser.error('--capture-every requires --capture and a positive interval')
+    if args.capture_targets and not args.capture:
+        parser.error('--capture-targets requires --capture')
     exe, assets, state = [outside(p, repo) for p in (args.game, args.assets, args.state)]
     data = outside(args.data or state/'data', repo)
     cache = outside(args.cache or state/'cache', repo)
@@ -160,6 +215,7 @@ def main():
         parser.error('Game executable, asset directory or built backend is missing')
     if state == assets or state.is_relative_to(assets) or assets.is_relative_to(state):
         parser.error('State and original assets must be separate directories')
+    title_settings = configure_fsr(data, args.fsr)
     game, originals = package_view(exe, assets, state)
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     run = state / 'runs' / stamp
@@ -231,6 +287,8 @@ def main():
     if args.capture:
         (run/'frames').mkdir()
         settings.update(VICTORY_CAPTURE=str(run/'frames'), VICTORY_CAPTURE_WORLD='1')
+        if args.capture_targets:
+            settings['VICTORY_DUMP_TARGETS'] = '1'
         if args.capture_every:
             settings['VICTORY_CAPTURE_EVERY'] = str(args.capture_every)
     if args.relay:
@@ -270,7 +328,7 @@ def main():
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         new_sources[relative.as_posix()] = sha256(source)
-    metadata = dict(command=command, environment=settings,
+    metadata = dict(command=command, environment=settings, title_settings=title_settings,
                     base_commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'], text=True).strip(),
                     backend_sha256=backend_hash, source_diff_sha256=hashlib.sha256(patch).hexdigest(),
                     new_source_sha256=new_sources,

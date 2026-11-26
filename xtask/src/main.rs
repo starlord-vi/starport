@@ -54,3 +54,21 @@ fn workspace_root() -> PathBuf {
         .expect("xtask lives in the workspace")
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn native_rendering_launcher_preserves_settings_and_backups_offline() {
+        let result = std::process::Command::new("python")
+            .args(["-B", "scripts/test_starport.py"])
+            .current_dir(super::workspace_root())
+            .output()
+            .expect("Python is required by Play-Starport.cmd");
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

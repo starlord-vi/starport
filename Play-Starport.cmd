@@ -6,6 +6,9 @@ rem Mip default: skip 2 on <=1080p, retain at least 3. --skip-mips 0 disables.
 rem STARPORT_SKIP_TOP_MIP=0/1 remains an explicit compatibility override.
 rem Renderer A/B commands and all defaults/kill switches: VERIFY.md and VERIFY2.md.
 rem Device-removal diagnosis: --d3d12-debug --dred (slow; diagnostics build only).
+rem Native rendering: launcher sets saved fsrQuality=0 with an exact backup.
+rem --fsr preserve leaves saved settings untouched; restore the backup for FSR A/B.
+rem --capture --capture-targets additionally dumps selected intermediate targets.
 rem Default performance profile: relay stage 2, wide/readback joins, GPU-side
 rem comparison for >=1 MiB title buffers, and a 64-pass unchanged-slot census.
 rem Pass --preset balanced to disable those defaults for an A/B. Explicit
