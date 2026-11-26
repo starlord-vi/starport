@@ -1702,16 +1702,22 @@ impl HostHeap {
             // Not a view of ours (never written, or of a resource the
             // title released): nothing to read.
             if made[index as usize] != 0 {
-                made[index as usize] = 0;
-                self.make_null(index);
-                let _ = self.note_buffer(index, None, false);
+                // Keep the old view's resource dimension when nulling it.
+                // A null Texture2D where a shader expects a buffer is invalid.
+                self.unmake(&mut made, index);
             }
             // A raw CPU copy can clear a deferred slot before it was ever
             // made. Retire its queue/stride entry even with no host key.
             let _ = self.note_buffer(index, None, false);
             return None;
         };
-        if made[index as usize] != key {
+        // A transient host allocation/mapping refusal must not make an
+        // unchanged texture record permanently null. The draw is a new use
+        // and retries it; ordinary heap scans keep the existing lazy path.
+        let retry_null = for_draw
+            && is_texture_view(&view)
+            && self.kept.lock().unwrap_or_else(|e| e.into_inner())[index as usize].is_none();
+        if made[index as usize] != key || retry_null {
             // Views of other textures in the memory this one describes
             // are stale: their host slots read nothing from here on, and
             // let go of the host copies they held.
@@ -3017,6 +3023,35 @@ mod tests {
             &View::Placed(true, resource, desc)
         ));
         assert!(!same_placed_texture(&low, &View::Shader(0, None)));
+    }
+
+    /// A temporary make refusal cannot leave an unchanged texture null forever.
+    #[test]
+    fn an_unchanged_texture_record_recovers_a_null_host_view() {
+        let memory = crate::resource::Memory::descriptors(65536).unwrap();
+        let title = crate::descriptor::test_view_heap(8);
+        let heap = crate::descriptor::heap(title);
+        let host = heap.host().expect("D3D12 hardware required");
+        let resource = [3, 0, 0, 0, 16, 0, 16, 0x1_0001, 28, 1, 0, 0x100, 0, 0];
+        let mut desc = [0u32; 16];
+        desc[..6].copy_from_slice(&[28, 4, 5768, 0, 0, 1]);
+        desc[10] = memory.address() as u32;
+        desc[11] = (memory.address() >> 32) as u32;
+        let handle = heap.handle(3).unwrap();
+        crate::descriptor::create_placed_srv(std::ptr::null(), &resource, &desc, handle);
+        let view = host.mirror(3, handle, true).unwrap();
+        let View::Shader(image, _) = placed_texture(&view).unwrap() else {
+            panic!("placed shader texture required");
+        };
+        let image = crate::resource::host_copy(image as _).unwrap();
+        assert_eq!(host.shows(3, &image.texture), Some(true));
+        // A failed make leaves the same descriptor key with no kept native
+        // texture. Simulate that state without exhausting the machine's VRAM.
+        host.make_null(3);
+        assert_eq!(host.shows(3, &image.texture), None);
+        host.mirror(3, handle, true).unwrap();
+        assert_eq!(host.shows(3, &image.texture), Some(true));
+        crate::object::slot::<extern "system" fn(crate::object::This) -> u32>(title, 0x10)(title);
     }
 
     /// A null 3D UAV made on the real device leaves it alive.
