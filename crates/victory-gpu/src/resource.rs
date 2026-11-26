@@ -244,22 +244,26 @@ pub(crate) fn pc_format(format: u32) -> u32 {
 /// (NVIDIA) refused the whole texture, so every pass that wrote it drew
 /// nothing. There 8-bit RGBA stands in: the same channels in the same
 /// order, every 4-bit level exact and every 5-bit level within 1/510.
+/// The console also renders to and gives unordered access to R9G9B9E5
+/// (67), which PC D3D12 does not permit. R16G16B16A16_FLOAT stands in: it
+/// is renderable and writable, and preserves at least the original's range
+/// and precision. Sampled-only R9G9B9E5 textures remain in format 67.
 /// The title's pipelines and views of such targets name the stand-in too
 /// ([`view_format`], the host view checks).
 /// shortcut: copies between such a target and a texture the title fills
 /// itself in the 16-bit format are skipped ([`stands_in`]); convert them
 /// if a pass turns out to need one.
 pub(crate) fn target_format(format: u32) -> u32 {
-    const STAND_INS: [(u32, u32); 2] = [(86, 28), (115, 28)];
+    const STAND_INS: [(u32, u32); 3] = [(86, 28), (115, 28), (67, 10)];
     let Some(i) = STAND_INS.iter().position(|&(f, _)| f == format) else {
         return format;
     };
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Direct3D12::*;
-        static REFUSED: std::sync::OnceLock<[bool; 2]> = std::sync::OnceLock::new();
+        static REFUSED: std::sync::OnceLock<[bool; 3]> = std::sync::OnceLock::new();
         let refused = REFUSED.get_or_init(|| {
-            STAND_INS.map(|(f, _)| {
+            STAND_INS.map(|(f, stand_in)| {
                 let Some(host) = crate::host::host() else {
                     return false;
                 };
@@ -281,7 +285,8 @@ pub(crate) fn target_format(format: u32) -> u32 {
                 if refused {
                     tracing::info!(
                         format = f,
-                        "the host does not render to this format: 8-bit RGBA stands in"
+                        stand_in,
+                        "the host does not render to this format: a stand-in is used"
                     );
                 }
                 refused
@@ -2880,6 +2885,95 @@ mod tests {
             layout: 0,
             ..buffer(0)
         }
+    }
+
+    /// Series S creates a 1920x1080 R9G9B9E5 texture with both render-target
+    /// and unordered-access flags when the world starts. PC D3D12 rejects
+    /// that resource, and an RTV in the same format is a void API call that
+    /// removes the device. Exercise both calls on the real host device while
+    /// keeping ordinary sampled R9G9B9E5 textures in their native format.
+    #[cfg(windows)]
+    #[test]
+    fn r9g9b9e5_target_uses_a_device_safe_stand_in() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+
+        let Some(host) = crate::host::host() else {
+            return; // no host GPU
+        };
+        let null: This = std::ptr::null();
+
+        let sampled = host_texture(&texture(16, 16, 67, 1), 0, null.cast()).unwrap();
+        // SAFETY: a live resource.
+        assert_eq!(unsafe { sampled.GetDesc() }.Format.0, 67);
+
+        let desc = ResourceDesc {
+            flags: 5,
+            ..texture(16, 16, 67, 1)
+        };
+        let mut title = null;
+        assert_eq!(
+            create_committed(
+                null,
+                &PROPERTIES,
+                0,
+                &desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut title,
+            ),
+            S_OK
+        );
+        let texture = host_resource(title).expect("the stand-in resource must be accepted");
+        // SAFETY: a live resource.
+        let native = unsafe { texture.GetDesc() };
+        assert_eq!(native.Format.0, 10);
+        assert_eq!(native.Flags.0 & 5, 5);
+
+        // Follow the title's descriptor-recording path: format 67 must turn
+        // into the exact same stand-in as the resource before the void API.
+        let mut record = [0u8; 112];
+        let view = [67, 4, 0, 0, 0, 0];
+        crate::descriptor::create_rtv(null, title, &view, record.as_mut_ptr() as u64);
+        // SAFETY: create_rtv wrote one unaligned record into this storage.
+        let record = unsafe {
+            record
+                .as_ptr()
+                .cast::<crate::descriptor::RtvRecord>()
+                .read_unaligned()
+        };
+        let rtv = record.desc().expect("an explicitly described RTV");
+        assert_eq!(rtv.Format.0, 10);
+        host.rtv(Some(&texture.texture), Some(&rtv));
+
+        let heap: ID3D12DescriptorHeap = unsafe {
+            host.device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: 1,
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+        let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT(10),
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            ..Default::default()
+        };
+        // SAFETY: a live resource and a slot in a live descriptor heap.
+        unsafe {
+            host.device.CreateUnorderedAccessView(
+                Some(&texture.texture),
+                None::<&ID3D12Resource>,
+                Some(&uav),
+                heap.GetCPUDescriptorHandleForHeapStart(),
+            );
+            assert!(host.device.GetDeviceRemovedReason().is_ok());
+        }
+
+        drop(texture);
+        slot::<Release>(title, 0x10)(title);
     }
 
     #[cfg(windows)]
