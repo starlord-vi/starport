@@ -525,3 +525,9 @@ Synchronization runs before the bindless-buffer/texture pass and submission.
 `starport::descriptors` logs pages scanned, changed/mirrored records and CPU
 time per frame. This timing overlaps preparing and heap-buffer timing.
 No executable store hooks or reduced-frequency fallback are used.
+
+Runtime-owned descriptor memory uses a private `MEM_WRITE_WATCH` reservation.
+The first synchronization scans it once; later passes query dirty pages and
+retain independent cursors in the shared journal. Allocation failure falls
+back to ordinary memory plus conservative full scans, reported explicitly.
+Placed heaps retain their title-owned backing.

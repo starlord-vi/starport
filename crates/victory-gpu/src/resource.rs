@@ -924,6 +924,10 @@ pub(crate) struct Memory {
     /// Set when the memory came from the title's allocator, with these
     /// allocation attributes (it goes back there).
     attributes: Option<u64>,
+    /// Descriptor heaps use their own write-watched reservation so raw
+    /// descriptor stores are observable without scanning every slot.
+    #[cfg(windows)]
+    watched: bool,
 }
 
 pub type AllocRoutine = extern "system" fn(usize, u64) -> *mut c_void;
@@ -987,12 +991,53 @@ impl Memory {
             ptr,
             layout,
             attributes: Some(attributes),
+            #[cfg(windows)]
+            watched: false,
         })
     }
 
     /// `size` zeroed bytes aligned to `alignment` (a power of two).
     pub(crate) fn zeroed(size: u64, alignment: u64) -> Result<Memory, HRESULT> {
         Memory::new(AllocationInfo { size, alignment })
+    }
+
+    pub(crate) fn descriptors(size: u64) -> Result<Memory, HRESULT> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Memory::{
+                MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc,
+            };
+            const MEM_WRITE_WATCH: u32 = 0x20_0000;
+            let layout =
+                Layout::from_size_align(usize::try_from(size).map_err(|_| E_INVALIDARG)?, 64)
+                    .map_err(|_| E_INVALIDARG)?;
+            if size == 0 {
+                return Err(E_INVALIDARG);
+            }
+            // SAFETY: a new private reservation; Windows owns dirty bits.
+            let ptr = unsafe {
+                VirtualAlloc(
+                    std::ptr::null(),
+                    layout.size(),
+                    MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH,
+                    PAGE_READWRITE,
+                )
+            };
+            if let Some(ptr) = NonNull::new(ptr.cast::<u8>()) {
+                TITLE_ALLOCATED.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+                return Ok(Memory {
+                    ptr,
+                    layout,
+                    attributes: None,
+                    watched: true,
+                });
+            }
+            tracing::warn!(
+                size,
+                "write-watched descriptor allocation unavailable; using conservative scans"
+            );
+        }
+        Self::zeroed(size, 64)
     }
 
     pub(crate) fn address(&self) -> u64 {
@@ -1019,6 +1064,8 @@ impl Memory {
             ptr,
             layout,
             attributes: None,
+            #[cfg(windows)]
+            watched: false,
         })
     }
 }
@@ -1027,6 +1074,14 @@ impl Drop for Memory {
     fn drop(&mut self) {
         if self.attributes.is_none() {
             TITLE_ALLOCATED.fetch_sub(self.layout.size(), std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(windows)]
+        if self.watched {
+            use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
+            crate::watch::title_memory_remapped(self.ptr.as_ptr() as usize, self.layout.size());
+            // SAFETY: this reservation was allocated by descriptors().
+            unsafe { VirtualFree(self.ptr.as_ptr().cast(), 0, MEM_RELEASE) };
+            return;
         }
         match (self.attributes, ALLOCATOR.get()) {
             (Some(attributes), Some(&(_, free))) => free(self.ptr.as_ptr().cast(), attributes),

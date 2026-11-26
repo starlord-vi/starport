@@ -1005,7 +1005,7 @@ pub(crate) extern "system" fn create_heap(
     let (start, memory) = if placed {
         (placement.address, None)
     } else {
-        match Memory::zeroed(size, 64) {
+        match Memory::descriptors(size) {
             Ok(memory) => (memory.address(), Some(memory)),
             Err(hr) => return hr,
         }

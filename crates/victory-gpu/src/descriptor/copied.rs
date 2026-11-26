@@ -92,6 +92,10 @@ pub(super) fn sync(
     let mut copied = copied.lock().unwrap_or_else(|e| e.into_inner());
     copied.records.resize(count, [0; 3]);
     let tracked = crate::watch::writes(start, end, true);
+    if !copied.initialized {
+        tracing::info!(target: "starport::descriptors", start=format_args!("{start:#x}"), count,
+            step, tracked=tracked.is_some(), "descriptor copy tracking initialized");
+    }
     if tracked.is_none() {
         STATS[4].fetch_add(1, Relaxed);
     }
@@ -243,5 +247,42 @@ mod tests {
         super::sync(0x1000, 8, 32, &copied, host);
         assert_eq!(copied.lock().unwrap().pending.len(), 1);
         slot::<extern "system" fn(This) -> u32>(title, 0x10)(title);
+    }
+
+    #[test]
+    fn independent_cursors_both_observe_a_write_watched_raw_copy() {
+        let memory = crate::resource::Memory::descriptors(65536).unwrap();
+        let start = memory.address();
+        assert!(
+            crate::watch::writes(start as usize, start as usize + 65536, true).is_some(),
+            "Windows write-watch is required for this regression"
+        );
+        let (a, b) = (descriptor::test_view_heap(8), descriptor::test_view_heap(8));
+        let (ah, bh) = (
+            descriptor::heap(a).host().unwrap(),
+            descriptor::heap(b).host().unwrap(),
+        );
+        let (ac, bc) = (Default::default(), Default::default());
+        super::sync(start, 8, 32, &ac, ah);
+        super::sync(start, 8, 32, &bc, bh);
+        let mut source = [0u32; 8];
+        let mut view = [0u32; 10];
+        view[1] = 1; // structured SRV, four bytes per element
+        view[7] = 4;
+        // Null resource keeps the regression independent of texture data;
+        // the declaration alone enters the bindless-buffer set.
+        descriptor::create_srv(
+            std::ptr::null(),
+            std::ptr::null(),
+            &view,
+            source.as_mut_ptr() as u64,
+        );
+        unsafe { std::ptr::copy_nonoverlapping(source.as_ptr(), (start + 3 * 32) as *mut u32, 8) };
+        super::sync(start, 8, 32, &ac, ah);
+        super::sync(start, 8, 32, &bc, bh);
+        assert!(ah.buffer_slots().contains(&3));
+        assert!(bh.buffer_slots().contains(&3));
+        slot::<extern "system" fn(This) -> u32>(a, 0x10)(a);
+        slot::<extern "system" fn(This) -> u32>(b, 0x10)(b);
     }
 }
