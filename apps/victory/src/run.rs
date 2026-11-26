@@ -126,9 +126,10 @@ pub fn run(
     victory_hle::runtime::set_title_dll_loader(Box::new(move |file| {
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
-    // SAFETY: imports are bound; from here on we run title code.
+    #[cfg(feature = "diagnostics")]
     victory_hle::on_watchdog_stacks(victory_loader::dump_stacks);
     victory_hle::start_watchdog();
+    // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
     if let Some(seconds) = seconds {
         victory_hle::modules::lifecycle::stop_after(seconds);
