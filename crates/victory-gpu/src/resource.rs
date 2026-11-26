@@ -1145,7 +1145,8 @@ pub(crate) struct HostTexture {
     pub(crate) last_uploaded_ms: std::sync::atomic::AtomicU64,
     pub(crate) upload_count: std::sync::atomic::AtomicU32,
     pub(crate) reuploads: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    pub(crate) upload_hashes: std::sync::Arc<std::sync::Mutex<Vec<Option<blake3::Hash>>>>,
+    pub(crate) upload_hashes:
+        std::sync::Arc<std::sync::Mutex<Vec<Option<crate::work::ContentHash>>>>,
     pub(crate) upload_telemetry: std::sync::OnceLock<std::sync::Arc<crate::telemetry::Resource>>,
     /// Source mip represented by host mip zero (CPU-streamed views only).
     pub(crate) first_mip: u32,

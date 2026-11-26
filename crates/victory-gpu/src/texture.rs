@@ -35,10 +35,11 @@ macro_rules! once {
 pub(crate) struct Staging {
     epoch: u64,
     tail: bool,
+    sparse: bool,
     demoted: bool,
     host_key: usize,
     telemetry: Arc<crate::telemetry::Resource>,
-    upload_hashes: Arc<Mutex<Vec<Option<blake3::Hash>>>>,
+    upload_hashes: Arc<Mutex<Vec<Option<crate::work::ContentHash>>>>,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     layout: victory_formats::texture::Layout,
@@ -63,7 +64,7 @@ struct Last {
     /// Cacheable CPU pixels. Immutable GPU snapshots must not be copied
     /// back from a write-combined UPLOAD heap mapping.
     linear: Vec<u8>,
-    hash: Option<blake3::Hash>,
+    hash: Option<crate::work::ContentHash>,
     asked: u64,
     /// The frame a partly mapped texture was last read in.
     partial: Option<u64>,
@@ -594,9 +595,8 @@ impl Upload {
     }
 }
 
-fn timed_hash(bytes: &[u8]) -> blake3::Hash {
-    let _timer = crate::perf::time(crate::perf::Part::Hashing);
-    blake3::hash(bytes)
+fn timed_hash(bytes: &[u8]) -> crate::work::ContentHash {
+    crate::work::hash(bytes)
 }
 
 impl Staging {
@@ -613,10 +613,16 @@ impl Staging {
         hashes.resize(self.footprints.len(), None);
         let mut selected = Vec::new();
         let mut bytes = 0u64;
+        let linear: &[u8] = &last.linear;
+        let content_hashes = crate::work::map(self.footprints.len(), |i| {
+            let from = self.footprints[i].Offset as usize;
+            let end = self.footprints.get(i + 1).map_or(self.bytes, |f| f.Offset) as usize;
+            timed_hash(&linear[from..end])
+        });
         for (i, footprint) in self.footprints.iter().enumerate() {
             let from = footprint.Offset as usize;
             let end = self.footprints.get(i + 1).map_or(self.bytes, |f| f.Offset) as usize;
-            let hash = timed_hash(&last.linear[from..end]);
+            let hash = content_hashes[i];
             if !crate::watch::dirty_tracking() || hashes[i] != Some(hash) {
                 let mut packed = *footprint;
                 bytes = bytes.next_multiple_of(512);
@@ -706,7 +712,16 @@ impl Staging {
         let start = self.memory as usize;
         let mut last = waited(0, || self.last.lock().unwrap_or_else(|e| e.into_inner()));
         let last = &mut *last;
-        if self.tail {
+        if self.sparse {
+            if !self.tail
+                && let Some((now, written)) =
+                    waited(1, || crate::watch::writes(start, start + size, false))
+            {
+                if last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked) {
+                    return 0;
+                }
+                last.asked = now;
+            }
             let Some(pixels) = tail_pixels(
                 &self.layout,
                 self.memory,
@@ -715,6 +730,7 @@ impl Staging {
                 &self.footprints,
                 self.bytes,
             ) else {
+                last.asked = 0;
                 return 0;
             };
             let hash = timed_hash(&pixels);
@@ -1251,7 +1267,7 @@ pub(crate) fn initialization_footprints(
 pub(crate) fn initialized_hashes(
     texture: &ID3D12Resource,
     pixels: &[u8],
-) -> Option<Vec<Option<blake3::Hash>>> {
+) -> Option<Vec<Option<crate::work::ContentHash>>> {
     let (footprints, total) = initialization_footprints(texture)?;
     if pixels.len() as u64 != total {
         return None;
@@ -1313,6 +1329,10 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     let s = Arc::new(Staging {
         epoch: copy.epoch,
         tail: copy.tail,
+        sparse: copy.tail
+            || (copy.first_mip > 0
+                && crate::progressive::enabled()
+                && crate::work::retained_reads()),
         demoted: copy.demoted,
         host_key: copy.texture.as_raw() as usize,
         telemetry: copy

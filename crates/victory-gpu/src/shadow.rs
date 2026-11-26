@@ -1137,6 +1137,11 @@ const PIECE: usize = 64 << 10;
 /// # Safety
 /// Both ranges are valid for `len` bytes and do not overlap.
 unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
+    if crate::work::enabled() {
+        // SAFETY: the caller's live, nonoverlapping ranges.
+        unsafe { crate::work::copy(src, dst, len) };
+        return;
+    }
     const PER_THREAD: usize = 16 << 20;
     let threads = (len / PER_THREAD).clamp(1, 6);
     if threads == 1 {
@@ -1161,7 +1166,8 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
 
 /// Whether the snapshots of a submission's shader-written ranges, and the
 /// compare that finds what the shaders wrote, run on several threads
-/// across ranges (`VICTORY_WIDE_BACK=1`; off by default).
+/// across ranges (on with STARPORT_PARALLEL_WORK by default;
+/// VICTORY_WIDE_BACK=0 explicitly disables batching).
 ///
 /// Both ran range by range on the submitting thread, a range on several
 /// threads only if it was 16 MiB or more. The ranges left on the CPU's side
@@ -1182,7 +1188,9 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
 /// lists only afterwards).
 pub(crate) fn wide_back() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_BACK").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        std::env::var_os("VICTORY_WIDE_BACK").map_or_else(crate::work::enabled, |v| v == "1")
+    })
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -1231,6 +1239,10 @@ fn workers() -> &'static Workers {
 /// Runs `jobs` on the kept threads and on this one, and returns when all
 /// of them are done. The jobs copy and compare memory; they do not panic.
 fn wide(jobs: Vec<Job>) {
+    if crate::work::enabled() {
+        crate::work::run(jobs);
+        return;
+    }
     if jobs.len() < 2 {
         for job in jobs {
             job();
@@ -2437,7 +2449,12 @@ impl Shadow {
             found
         };
         const PER_THREAD: usize = 16 << 20;
-        let threads = ((to - from) / PER_THREAD).clamp(1, 8);
+        let cap = if crate::work::enabled() {
+            crate::work::threads()
+        } else {
+            8
+        };
+        let threads = ((to - from) / PER_THREAD).clamp(1, cap);
         if threads == 1 {
             return scan(from, to);
         }
@@ -2450,6 +2467,12 @@ impl Shadow {
             (at - (start + at) % PIECE).max(from)
         };
         let scan = &scan;
+        if crate::work::enabled() {
+            return crate::work::map(threads, |i| scan(cut(i), cut(i + 1)))
+                .into_iter()
+                .flatten()
+                .collect();
+        }
         std::thread::scope(|s| {
             let parts: Vec<_> = (0..threads)
                 .map(|i| {

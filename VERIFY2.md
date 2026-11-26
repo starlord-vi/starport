@@ -21,6 +21,10 @@ $env:STARPORT_FALLBACK_COLOR = 'black'
 $env:STARPORT_LEGACY_RESIDENCY = '0'
 $env:STARPORT_DIRTY_TRACKING = '1'
 $env:STARPORT_SELFWRITE_FILTER = 'off' # preserve pass-1 refresh behavior
+$env:STARPORT_PARALLEL_WORK = '0'
+$env:STARPORT_XXH3 = '0'
+$env:STARPORT_RETAINED_MIP_READS = '0'
+$env:STARPORT_TRIM_CACHES = '0'
 $env:STARPORT_FRAMES_IN_FLIGHT = '1'
 $env:STARPORT_MEM_BUDGET_MB = '0'
 $env:STARPORT_TELEMETRY = '1'
@@ -254,4 +258,49 @@ working READBACK=lazy switch or adaptive fault policy in this build; do not
 interpret the two fixture tests as a working game integration. The requested
 lazy A/B stage must be skipped until those contracts are implemented.
 
-The remaining task comparisons will be added with their implementations.
+## Task 5: bounded CPU work and retained-mip reads
+
+After the self-write comparison, test these changes separately, with the
+same F8 scene. Restart between changes; switches are cached per process.
+
+```powershell
+$env:STARPORT_PARALLEL_WORK = '1'
+$env:STARPORT_WORKER_THREADS = '12' # this machine has 16 logical processors
+$env:STARPORT_XXH3 = '1'
+$env:STARPORT_RETAINED_MIP_READS = '1'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+| Flag | Default | Kill switch / effect |
+| --- | --- | --- |
+| STARPORT_PARALLEL_WORK | 1 | 0 restores legacy scheduling and the old default of unbatched snapshots/scans |
+| STARPORT_WORKER_THREADS | max(1, logical processors - 4) | 1 runs the new work inline; explicit values clamp to 1..logical processors |
+| STARPORT_XXH3 | 1 | 0 restores full BLAKE3 hashes |
+| STARPORT_RETAINED_MIP_READS | 1 | 0 restores the original full source read for promoted BC images; initial real tails still require sparse reads |
+
+One dedicated Rayon pool bounds CPU snapshot/copy/dirty-scan and per-mip hash
+work. This cap does not include title threads or existing PSO/I/O workers.
+Explicit VICTORY_WIDE_BACK overrides snapshot batching. Content checks use
+xxh3-128, never DefaultHasher; the hash is a change detector, not a security
+boundary. Uploads still retain their original source stride and GPU footprints.
+
+Promoted rebased progressive BC images can read just pages containing retained
+mips, instead of copying discarded top mips. Private write-watch clean ranges
+skip this work; mapped aliases without a reliable native dirty journal still
+read/hash their retained pixels conservatively. A dirty mip is hashed as a
+whole, not claimed as a new general per-4-KiB tiled-texture hash cache. Existing
+buffer dirty-page comparison and batched large-region GetWriteWatch remain.
+The sparse block/page traversal can cost CPU time; compare the hashing and
+preparing medians with RETAINED_MIP_READS=0 if it dominates.
+
+This is the CPU-work portion of task 5. There is **no new upload copy queue**,
+and buffer-output submissions still serialize for eager CPU visibility. FIF=2
+can use the existing presentation slots for eligible submissions; it does not
+establish the requested lazy buffer overlap. Keep FIF=1 for these comparisons.
+Skip the requested lazy/FIF async stages until the memory contracts above are
+implemented. No lazy switch or fence is bypassed to manufacture overlap.
+
+New library dependencies are pinned by Cargo.lock: Rayon 1.12.0 (rayon-core
+1.13.0, MIT OR Apache-2.0; [source](https://github.com/rayon-rs/rayon)) and
+xxhash-rust 0.8.21 (BSL-1.0; [source](https://github.com/DoumanAsh/xxhash-rust)).
+These are dependency uses, with no copied upstream renderer implementation.

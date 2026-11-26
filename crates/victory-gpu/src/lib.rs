@@ -24,6 +24,7 @@ mod progressive;
 #[cfg(test)]
 mod readback_probe;
 mod selfwrite;
+mod work;
 pub use perf::hotkey as bench_hotkey;
 #[cfg(windows)]
 mod binding_trace;
