@@ -536,7 +536,11 @@ pub(crate) fn sweep() {
             EVICTED.fetch_add(1, Relaxed);
             EVICTED_BYTES.fetch_add(bytes, Relaxed);
             reclaim = reclaim.saturating_sub(bytes);
-            tracing::info!(target:"starport::eviction",guest,bytes,patched,age_ms=age,reuploads,
+            // The frame/memory telemetry already reports aggregate eviction
+            // counts. Keep the per-allocation record available for a focused
+            // trace without formatting and writing thousands of INFO lines in
+            // an ordinary world run.
+            tracing::debug!(target:"starport::eviction",guest,bytes,patched,age_ms=age,reuploads,
                 reason=if hard {"mapping-generation-change"} else if !not_invalid {"guest-overwrite"} else {"local-budget-pressure"},
                 "released backing after fence completion and descriptor patching; no CPU pixel cache retained");
         } else {

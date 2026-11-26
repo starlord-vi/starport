@@ -212,8 +212,22 @@ def main():
         settings.update(VICTORY_TEXTURE_NO_WAIT='1', VICTORY_JOIN_COPIES='1', VICTORY_WIDE_REFRESH='1')
     if args.preset == 'throughput':
         # Relay's own default stage; do not accidentally override it with
-        # LATE_WAIT=3 or enable diagnostic per-list GPU timing.
-        settings.update(VICTORY_RELAY='2', VICTORY_CARD_REHASH_RUNS='1')
+        # LATE_WAIT=3 or enable diagnostic per-list GPU timing. The first
+        # world-run profile showed the CPU revisiting about 42,000 unchanged
+        # bindless slots and comparing 260+ MiB in large title-buffer copies
+        # per frame while the GPU sat idle. Changed slots still update on the
+        # next pass; the wider round only spaces the safety census out. Small
+        # buffer copies use GPU-side comparison within a bounded extra 768 MiB
+        # allocation budget. Explicit environment values remain A/B overrides.
+        for name, value in {
+            'VICTORY_RELAY': '2',
+            'VICTORY_WIDE_BACK': '1',
+            'VICTORY_CARD_REHASH_RUNS': '1',
+            'VICTORY_CARD_BUFFERS_MIN_MB': '1',
+            'VICTORY_CARD_BUFFERS_MB': '768',
+            'VICTORY_HEAP_ROUND': '64',
+        }.items():
+            settings.setdefault(name, value)
     if args.capture:
         (run/'frames').mkdir()
         settings.update(VICTORY_CAPTURE=str(run/'frames'), VICTORY_CAPTURE_WORLD='1')

@@ -31,7 +31,18 @@ pub(crate) fn pc_state(state: u32) -> u32 {
 /// index buffer, stream out, indirect arguments, as in "generic read").
 pub(crate) fn texture_state(state: u32) -> u32 {
     const BUFFER_ONLY: u32 = 0x1 | 0x2 | 0x100 | 0x200;
-    pc_state(state) & !BUFFER_ONLY
+    const SHADER_READ: u32 = 0x40 | 0x80;
+    // Host root signatures expose descriptor tables to every shader stage.
+    // D3D12 therefore requires both shader-resource state bits even when the
+    // console only named the stage that happened to read the texture.  Both
+    // bits are read-only and may be combined; omitting either makes binding a
+    // DATA_STATIC_WHILE_SET_AT_EXECUTE table undefined on the host.
+    let state = pc_state(state) & !BUFFER_ONLY;
+    if state & SHADER_READ != 0 {
+        state | SHADER_READ
+    } else {
+        state
+    }
 }
 
 /// Render target views live only until their command is recorded, so a
@@ -733,6 +744,16 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn texture_states_cover_every_host_shader_stage() {
+        assert_eq!(super::texture_state(0x80), 0xc0);
+        assert_eq!(super::texture_state(0x40), 0xc0);
+        assert_eq!(super::texture_state(0xc0), 0xc0);
+        assert_eq!(super::texture_state(0x8000_0080), 0xc0);
+        assert_eq!(super::texture_state(0x1 | 0x2 | 0x100 | 0x200), 0);
+        assert_eq!(super::texture_state(0x400), 0x400);
+    }
+
     #[test]
     fn sparse_copies_preserve_islands_and_observe_remaps() {
         use windows_sys::Win32::System::Memory::*;

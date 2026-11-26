@@ -51,8 +51,11 @@ The DXC path above is the runner's current expected layout; supply those DXC
 tools separately. From the repository, run `./Play-Starport.cmd`. It defaults
 to the Series S profile, the `throughput` preset and keyboard/mouse controls,
 runs until you close the game and records lightweight diagnostics. Throughput
-enables relay stage 2 and exact adjacent card-rehash run joining. Explicit
-options override the profile:
+enables relay stage 2, exact adjacent card-rehash run joining, wide CPU
+readback work, GPU-side comparison for title buffers from 1 MiB up (within a
+768 MiB card-buffer cap), and a 64-pass interval for the unchanged bindless
+slot census. Changed descriptor slots are still handled on the next pass.
+Explicit environment values and command options override the profile:
 
 ```powershell
 .\Play-Starport.cmd --console series-x --no-skip-top-mip
@@ -242,7 +245,8 @@ time on the test machines. Set them in PowerShell before running the script.
 | `VICTORY_CAPTURE=<dir>` + `VICTORY_CAPTURE_FRAMES=<list>` | save those frames as PNG (diagnostics build) |
 | `VICTORY_KEYS=30:Enter,35:X` | press keys at those seconds (diagnostics build) |
 | `STARPORT_BENCH=1` + `STARPORT_BENCH_AFTER_SECONDS=90` | start one 30-second benchmark automatically after 90 seconds; useful for unattended, fixed-input runs |
-| `VICTORY_HEAP_ROUND=32` | revisit unchanged bindless buffer-view slots every 32 passes instead of 16; changed slots still run immediately |
+| `VICTORY_HEAP_ROUND=64` | throughput default: revisit unchanged bindless buffer-view slots every 64 passes instead of 16; changed slots still run immediately |
+| `VICTORY_CARD_BUFFERS_MIN_MB=1` + `VICTORY_CARD_BUFFERS_MB=768` | throughput defaults: move large title-buffer comparisons onto the GPU within a bounded allocation cap |
 | `VICTORY_D3D12_DRED=1` | on a GPU failure, report the commands in flight |
 | `VICTORY_PIPELINE_WAIT_MS=24` | shorter per-frame wait for pipelines still being built |
 
