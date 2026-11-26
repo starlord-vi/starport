@@ -14,6 +14,7 @@ From `A:\starport\port` in PowerShell:
 $env:STARPORT_SERIES_S = '0'
 $env:STARPORT_MAX_RES = '1920x1080'
 $env:STARPORT_SKIP_MIPS = '2'
+$env:STARPORT_SKIP_MIPS_TARGET_DIM = '0' # preserve fixed-N pass-1 baseline
 $env:STARPORT_PROGRESSIVE_TEXTURES = '0' # pass-1 admission for the baseline
 $env:STARPORT_EVICTOR_V2 = '0' # pass-1 descriptor-patched eligibility
 $env:STARPORT_FALLBACK_COLOR = 'black'
@@ -176,5 +177,33 @@ count policy decisions across sweeps, not unique textures. Every replacement
 reads current guest pixels and validates content hashes; no evicted CPU pixel
 cache is retained. A lower eviction count can be correct if it removes churn;
 judge RAM/VRAM, due backlog and the same-scene bench together.
+
+## Task 3: cap eligible streaming mip0 by dimension
+
+Hold the preceding settings fixed and add:
+
+```powershell
+$env:STARPORT_SKIP_MIPS_TARGET_DIM = '1024'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+An explicitly set target overrides fixed N. `0` disables the dimension rule
+and restores fixed N. Values 16..16384 are accepted; malformed values disable
+the dimension rule. With neither target nor an explicit legacy N/alias, the
+new automatic target is 1024. An explicit `--skip-mips`, SKIP_MIPS or alias
+keeps its previous meaning when TARGET_DIM is unset, preserving compatibility.
+MIN_DIM remains an eligibility gate for both rules. Progressive tails remain
+temporary smaller backing; promotion uses this same full-target calculation.
+
+Only eligible CPU-owned placed BC images are rebased, with at least three
+source mips retained. Short source chains can make the dimension target
+unattainable: a bounded `starport::mips` warning identifies the shape, target
+and actual first mip. SRVs and metadata report that actual shape rather than
+pretending absent mips exist. Array/cube layer counts do not change. Native
+typed GetDimensions sees the corresponding native SRV; size-only lowering
+reads the same effective allocation generation, including progressive tails.
+No translator behavior changed; unsupported descriptor operations still fail
+with their shader diagnostic. Hard-coded title texel coordinates still need
+visual comparison. Check target logs, live-byte histogram and the same F8 scene.
 
 The remaining task comparisons will be added with their implementations.

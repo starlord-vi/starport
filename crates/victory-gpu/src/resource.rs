@@ -1884,8 +1884,8 @@ impl HostTexture {
 /// objects and uncompressed aliases of GPU-written targets stay exact.
 #[cfg(windows)]
 fn streaming_first_mip(desc: &ResourceDesc, placed: bool) -> u32 {
-    static POLICY: std::sync::OnceLock<(u32, u64)> = std::sync::OnceLock::new();
-    let (count, minimum) = *POLICY.get_or_init(|| {
+    static POLICY: std::sync::OnceLock<(u32, u64, u64)> = std::sync::OnceLock::new();
+    let (count, minimum, target) = *POLICY.get_or_init(|| {
         let default = if crate::display::limit().is_some_and(|(w, h)| w <= 1920 && h <= 1080) {
             2
         } else {
@@ -1910,22 +1910,83 @@ fn streaming_first_mip(desc: &ResourceDesc, placed: bool) -> u32 {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|n| (16..=16384).contains(n))
             .unwrap_or(1024);
-        tracing::info!(target:"starport::mips",count,minimum,retained_mips=3,
-            "streaming mip policy; STARPORT_SKIP_MIPS=0 disables");
-        (count, minimum)
+        let explicit=std::env::var_os("STARPORT_SKIP_MIPS").is_some() || std::env::var_os("STARPORT_SKIP_TOP_MIP").is_some();
+        let asked=std::env::var("STARPORT_SKIP_MIPS_TARGET_DIM").ok();
+        let target=target_dimension(asked.as_deref(),explicit);
+        tracing::info!(target:"starport::mips",count,minimum,target_dimension=target,retained_mips=3,
+            "streaming mip policy; explicit target overrides N; target 0 restores fixed N; explicit legacy N keeps precedence over an unset target");
+        (count, minimum, target)
     });
-    streaming_mips(desc, placed, count, minimum)
+    if target == 0 {
+        return streaming_mips(desc, placed, count, minimum);
+    }
+    let first = target_mips(desc, placed, target, minimum);
+    if streaming_eligible(desc, placed, minimum)
+        && (desc.width.max(u64::from(desc.height)) >> first).max(1) > target
+    {
+        type Shape = (u64, u32, u16, u64);
+        static WARNED: std::sync::Mutex<std::collections::BTreeSet<Shape>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+        if warned.len() < 64 && warned.insert((desc.width, desc.height, desc.mip_levels, target)) {
+            tracing::warn!(target:"starport::mips",width=desc.width,height=desc.height,source_mips=mip_count(desc),target_dimension=target,first_mip=first,
+                "source chain cannot reach the requested dimension while retaining three mips; SRV/size metadata use the actual retained shape");
+        }
+    }
+    first
 }
 
 #[cfg(windows)]
-fn streaming_mips(desc: &ResourceDesc, placed: bool, count: u32, minimum: u64) -> u32 {
-    let eligible = placed
+fn target_dimension(value: Option<&str>, fixed_explicit: bool) -> u64 {
+    match value {
+        Some(value) => value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v == 0 || (16..=16384).contains(v))
+            .unwrap_or(0),
+        None => {
+            if fixed_explicit {
+                0
+            } else {
+                1024
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn target_mips(desc: &ResourceDesc, placed: bool, target: u64, minimum: u64) -> u32 {
+    if target == 0 || !streaming_eligible(desc, placed, minimum) {
+        return 0;
+    }
+    let mut needed = 0;
+    while desc
+        .width
+        .max(u64::from(desc.height))
+        .checked_shr(needed)
+        .unwrap_or(0)
+        .max(1)
+        > target
+    {
+        needed += 1;
+    }
+    needed.min(mip_count(desc).saturating_sub(3))
+}
+
+#[cfg(windows)]
+fn streaming_eligible(desc: &ResourceDesc, placed: bool, minimum: u64) -> bool {
+    placed
         && fills(desc)
         && desc.dimension == 3
         && desc.sample_count == 1
         && desc.width.max(u64::from(desc.height)) >= minimum
-        && matches!(pc_format(desc.format), 70..=84 | 94..=99);
-    if eligible {
+        && matches!(pc_format(desc.format),70..=84|94..=99)
+}
+
+#[cfg(windows)]
+fn streaming_mips(desc: &ResourceDesc, placed: bool, count: u32, minimum: u64) -> u32 {
+    if streaming_eligible(desc, placed, minimum) {
         count.min(mip_count(desc).saturating_sub(3))
     } else {
         0
@@ -3039,6 +3100,35 @@ mod tests {
         assert_eq!(streaming_mips(&desc, true, 12, 1024), 8);
         desc.flags = 4;
         assert_eq!(streaming_mips(&desc, true, 2, 1024), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_mip_policy_preserves_legacy_overrides_layers_and_short_chains() {
+        assert_eq!(target_dimension(None, false), 1024);
+        assert_eq!(target_dimension(None, true), 0);
+        assert_eq!(target_dimension(Some("1024"), true), 1024);
+        assert_eq!(target_dimension(Some("0"), false), 0);
+        assert_eq!(target_dimension(Some("invalid"), false), 0);
+        let mut desc = texture(8192, 4096, 98, 14);
+        desc.depth_or_array_size = 6;
+        assert_eq!(target_mips(&desc, true, 1024, 1024), 3);
+        assert_eq!(target_mips(&desc, true, 1000, 1024), 4);
+        let metadata = texture_size_words(&desc, None, 3).unwrap();
+        assert_eq!((metadata[0] >> 30 | (metadata[1] & 0x3fff) << 2) + 1, 1024);
+        assert_eq!((metadata[1] >> 14 & 0x3fff) + 1, 512);
+        assert_eq!(metadata[3] + 1, 6);
+        desc.mip_levels = 4;
+        assert_eq!(
+            target_mips(&desc, true, 1024, 1024),
+            1,
+            "keep three source mips even when the target is unattainable"
+        );
+        desc.format = 28;
+        assert_eq!(target_mips(&desc, true, 1024, 1024), 0);
+        desc.format = 98;
+        assert_eq!(target_mips(&desc, false, 1024, 1024), 0);
+        assert_eq!(target_mips(&desc, true, 1024, 16384), 0);
     }
 
     #[cfg(windows)]
