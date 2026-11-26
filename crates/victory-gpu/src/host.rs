@@ -6941,6 +6941,34 @@ impl Host {
                 list.CopyResource(&back, texture);
                 copy.keep(texture);
             }
+            // A composed frame alone cannot tell whether black pixels came
+            // from the title's scene plane or from our final compositor.
+            // On captured frames only, preserve both inputs after the draw
+            // has consumed them, then restore their shader-read states.
+            #[cfg(feature = "diagnostics")]
+            let plane_captures = if compositing && crate::capture::wanted(frame) {
+                let copy_source = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                list.ResourceBarrier(&[transition(texture, source_read, copy_source)]);
+                let scene = crate::capture::read_back(&self.device, list, texture);
+                list.ResourceBarrier(&[transition(texture, copy_source, source_read)]);
+                let interface = overlay.and_then(|(resource, _, _, _, _)| {
+                    list.ResourceBarrier(&[transition(
+                        resource,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        copy_source,
+                    )]);
+                    let read = crate::capture::read_back(&self.device, list, resource);
+                    list.ResourceBarrier(&[transition(
+                        resource,
+                        copy_source,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    )]);
+                    read
+                });
+                Some((scene, interface))
+            } else {
+                None
+            };
             // Composite diagnostics inspect the actual output, after both
             // planes and scaling, rather than reporting the scene alone.
             #[cfg(feature = "diagnostics")]
@@ -7021,6 +7049,15 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
+            }
+            #[cfg(feature = "diagnostics")]
+            if let Some((scene, interface)) = plane_captures {
+                if let Some((buffer, footprint)) = scene {
+                    crate::capture::save_plane_read_back(frame, "scene", &buffer, &footprint);
+                }
+                if let Some((buffer, footprint)) = interface {
+                    crate::capture::save_plane_read_back(frame, "interface", &buffer, &footprint);
+                }
             }
             let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
             let pending = p

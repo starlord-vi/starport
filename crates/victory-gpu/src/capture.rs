@@ -184,11 +184,6 @@ pub(crate) fn wanted(n: u64) -> bool {
             || every != 0 && n.is_multiple_of(every))
 }
 
-/// Saves 8-bit RGBA or BGRA rows (`pitch` bytes apart) as frame `n`.
-pub(crate) fn save(n: u64, width: u32, height: u32, pitch: usize, bgra: bool, rows: &[u8]) {
-    save_as(&format!("frame-{n}"), width, height, pitch, bgra, rows);
-}
-
 /// Saves 8-bit RGBA or BGRA rows as `<name>.png`, at half size.
 fn save_as(name: &str, width: u32, height: u32, pitch: usize, bgra: bool, rows: &[u8]) {
     let Some(folder) = folder() else { return };
@@ -330,9 +325,9 @@ fn read_back_of(
     }
 }
 
-/// Saves a frame read back by [`read_back`] (8-bit color only).
-pub(crate) fn save_read_back(
-    frame: u64,
+/// Saves an 8-bit-color resource read back by [`read_back`] as `<name>.png`.
+fn save_named_read_back(
+    name: &str,
     buffer: &ID3D12Resource,
     footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
 ) {
@@ -354,9 +349,29 @@ pub(crate) fn save_read_back(
         }
         let len = f.RowPitch as usize * f.Height as usize;
         let rows = std::slice::from_raw_parts(data.cast::<u8>(), len);
-        save(frame, f.Width, f.Height, f.RowPitch as usize, bgra, rows);
+        save_as(name, f.Width, f.Height, f.RowPitch as usize, bgra, rows);
         buffer.Unmap(0, None);
     }
+}
+
+/// Saves a presented frame read back by [`read_back`] (8-bit color only).
+pub(crate) fn save_read_back(
+    frame: u64,
+    buffer: &ID3D12Resource,
+    footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+) {
+    save_named_read_back(&format!("frame-{frame}"), buffer, footprint);
+}
+
+/// Saves one input plane of a presented frame. Plane captures distinguish a
+/// black scene supplied by the title from a fault in the final compositor.
+pub(crate) fn save_plane_read_back(
+    frame: u64,
+    plane: &str,
+    buffer: &ID3D12Resource,
+    footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+) {
+    save_named_read_back(&format!("frame-{frame}-{plane}"), buffer, footprint);
 }
 
 /// With `VICTORY_DUMP_TARGETS` set: title textures the frames listed in
