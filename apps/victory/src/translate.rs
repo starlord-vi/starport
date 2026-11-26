@@ -828,7 +828,7 @@ mod starport_regressions {
     }
 
     #[test]
-    #[ignore = "hardware PSO regression; four Wave64 BVH programs are still unsupported on Wave32"]
+    #[ignore = "hardware PSO regression; three Wave64 BVH programs are still unsupported on Wave32"]
     fn reported_compute_pipelines_validate_offline() {
         audit(true);
     }

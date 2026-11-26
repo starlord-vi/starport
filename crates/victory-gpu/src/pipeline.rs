@@ -410,13 +410,16 @@ pub(crate) fn guarded_compute_shader(this: This) -> Option<Arc<Shader>> {
     pipeline(this)
         .shaders
         .iter()
-        .find(|s| {
-            matches!(
-                s.hash.as_str(),
-                "2da4beb386509b77" | "369cbe906ea72764" | "02384a60fda6f2d0" | "6b82bc7d22016cb5"
-            )
-        })
+        .find(|s| guarded_compute_hash(&s.hash))
         .cloned()
+}
+
+#[cfg(windows)]
+fn guarded_compute_hash(hash: &str) -> bool {
+    matches!(
+        hash,
+        "369cbe906ea72764" | "02384a60fda6f2d0" | "6b82bc7d22016cb5"
+    )
 }
 
 /// List method: logs each pipeline's shaders the first time a list binds
@@ -790,6 +793,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn recovered_transmission_prefilter_is_not_reported_as_refused() {
+        assert!(!guarded_compute_hash("2da4beb386509b77"));
+        for hash in ["369cbe906ea72764", "02384a60fda6f2d0", "6b82bc7d22016cb5"] {
+            assert!(guarded_compute_hash(hash), "{hash}");
+        }
+    }
     use crate::object::{S_OK, slot};
 
     fn shaders(p: This) -> Vec<(&'static str, Vec<u8>)> {

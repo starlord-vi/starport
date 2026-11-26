@@ -28,10 +28,14 @@ No proprietary shader fixtures or disassembly are stored in this repository.
 
 | Shader hash | Offline observation | Proposed next step |
 | --- | --- | --- |
-| `2da4beb386509b77` | 38 lane-at exchanges, 1 first-lane read, 1 barrier call, shared-memory declaration | Audit every exchange's source lane/active mask. Prototype 64-lane register exchange in a uniform software-wave phase; validate both halves and inactive sources before integrating LDS ordering. |
 | `369cbe906ea72764` | No wave-intrinsic calls or barrier calls in the inspected DXIL; shared-memory declaration remains | First establish whether shared memory is live and whether lane/thread indexing or original execution ordering needs 64 lanes. A declaration alone proves neither requirement nor safety. Keep guarded until equivalence or a required synchronization schedule is demonstrated. |
 | `02384a60fda6f2d0` | 13 first-lane reads, 6 lane-at exchanges, 5 barrier calls, shared-memory declaration | Model the active 64-bit mask and reconvergence explicitly. Validate first-active-lane selection across the two NVIDIA halves and prove every existing barrier is reached uniformly. |
 | `6b82bc7d22016cb5` | 9 first-lane reads, 3 barrier calls, shared-memory declaration | Isolate first-active-lane and LDS publication phases. Validate masks with an empty low half, partial high half and divergent exits; only then test the ordered builder resources. |
+
+`2da4beb386509b77` no longer belongs in this emulation queue. Its apparent
+Wave64 requirement came from resource tracking that ignored the EXEC guard on
+the access instruction; the per-instruction lane-guard repair now lowers it to
+NVIDIA Wave32, validates as DXIL and creates a hardware compute PSO.
 
 ## Possible synchronization model
 

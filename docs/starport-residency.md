@@ -132,14 +132,15 @@ All four reported pixel containers translate and pass DXIL validation offline:
 `38bf0814e721a1b3`. No proprietary fixtures are stored in this repository.
 
 The four compute containers `2da4beb386509b77`, `369cbe906ea72764`,
-`02384a60fda6f2d0`, `6b82bc7d22016cb5` also pass DXIL validation, but
-NVIDIA compute PSO creation still fails. The D3D12 debug layer specifically
-reports a requested wave width of 64 against a device maximum of 32.
-These BVH programs use shared memory and lane operations in divergent groups
-larger than one console wave. PR 180's compute sampling fix does not resolve
-that synchronization problem. Wave64 metadata was not blindly removed, unsafe
-wave-wide retries were not enabled, and the RT completeness guard remains.
-These four pipelines are a remaining implementation blocker, not fixed shaders.
+`02384a60fda6f2d0`, `6b82bc7d22016cb5` also pass DXIL validation. The
+per-instruction lane-guard repair from `fxceless/victory-fork` revision
+`f4b48ad766ddbec1a1867022cd42f7645b0dd55e` lets
+`2da4beb386509b77` create an NVIDIA compute PSO. The other three still fail:
+the D3D12 debug layer reports a requested wave width of 64 against a device
+maximum of 32. Those BVH programs use shared memory and lane operations in
+divergent groups larger than one console wave. Wave64 metadata was not blindly
+removed, unsafe wave-wide retries were not enabled, and the RT completeness
+guard remains. These three pipelines remain implementation blockers.
 
 ## Validation and evidence
 
