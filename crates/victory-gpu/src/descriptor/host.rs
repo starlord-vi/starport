@@ -2002,24 +2002,6 @@ fn raw_window(offset: u64, first: u64, count: u32, stride: u32) -> Option<(u64, 
         .flatten()
 }
 
-/// The format the host uses for a typed buffer view. Translated shaders
-/// declare ordinary typed buffer loads and stores as 32-bit float channels
-/// (`victory_shader::emit::lower`); keeping an integer DXGI format here would
-/// make D3D12 numerically convert those float values instead of moving their
-/// bits. The corresponding float format has the same element layout and
-/// matches the shader declaration, so packed values survive unchanged.
-fn bit_exact_format(format: DXGI_FORMAT) -> DXGI_FORMAT {
-    match format {
-        DXGI_FORMAT_R32G32B32A32_UINT | DXGI_FORMAT_R32G32B32A32_SINT => {
-            DXGI_FORMAT_R32G32B32A32_FLOAT
-        }
-        DXGI_FORMAT_R32G32B32_UINT | DXGI_FORMAT_R32G32B32_SINT => DXGI_FORMAT_R32G32B32_FLOAT,
-        DXGI_FORMAT_R32G32_UINT | DXGI_FORMAT_R32G32_SINT => DXGI_FORMAT_R32G32_FLOAT,
-        DXGI_FORMAT_R32_UINT | DXGI_FORMAT_R32_SINT => DXGI_FORMAT_R32_FLOAT,
-        other => other,
-    }
-}
-
 /// Whether the host accepts a buffer view with these fields of a buffer of
 /// `width` bytes. It removes the device for one it does not (view creation
 /// returns nothing), and the console is laxer: the title's heap holds
@@ -2094,7 +2076,6 @@ fn buffer_srv(
             Flags: D3D12_BUFFER_SRV_FLAG_RAW,
         };
     }
-    desc.Format = bit_exact_format(desc.Format);
     let element = element_size(&desc);
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { &mut desc.Anonymous.Buffer };
@@ -2205,7 +2186,6 @@ fn buffer_uav(
         buffer.StructureByteStride,
     );
     let raw = buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0;
-    desc.Format = bit_exact_format(desc.Format);
     if window.is_some() {
         // (Left out at first: every structured unordered access view was then
         // refused by `buffer_view_ok` and left null, runs 15 and 16.)
@@ -2854,39 +2834,6 @@ mod tests {
         assert_eq!(half_view(&View::Unordered(7, 0, Some(words(10, 4)))), None);
         assert_eq!(half_view(&View::Shader(7, None)), None);
         assert_eq!(half_view(&View::Constant(0x1000, 256)), None);
-    }
-
-    /// Integer typed-buffer descriptors use the same-layout float format
-    /// expected by translated typed loads and stores. Other formats keep the
-    /// title's description.
-    #[test]
-    fn typed_buffer_views_of_32_bit_integers_move_bits() {
-        for (title, host) in [
-            (DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT),
-            (DXGI_FORMAT_R32_SINT, DXGI_FORMAT_R32_FLOAT),
-            (DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32_FLOAT),
-            (DXGI_FORMAT_R32G32B32_SINT, DXGI_FORMAT_R32G32B32_FLOAT),
-            (
-                DXGI_FORMAT_R32G32B32A32_UINT,
-                DXGI_FORMAT_R32G32B32A32_FLOAT,
-            ),
-        ] {
-            assert_eq!(bit_exact_format(title), host);
-            assert_eq!(
-                crate::resource::element(title.0 as u32),
-                crate::resource::element(host.0 as u32),
-                "format {title:?}"
-            );
-        }
-        for kept in [
-            DXGI_FORMAT_R32_FLOAT,
-            DXGI_FORMAT_R32_TYPELESS,
-            DXGI_FORMAT_UNKNOWN,
-            DXGI_FORMAT_R16G16_UINT,
-            DXGI_FORMAT_R8G8B8A8_UNORM,
-        ] {
-            assert_eq!(bit_exact_format(kept), kept);
-        }
     }
 
     /// Buffer views whose values the console would convert are identified,
