@@ -21,6 +21,8 @@ mod ambient;
 mod ambient_trace;
 mod perf;
 mod progressive;
+#[cfg(test)]
+mod readback_probe;
 mod selfwrite;
 pub use perf::hotkey as bench_hotkey;
 #[cfg(windows)]

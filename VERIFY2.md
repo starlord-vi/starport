@@ -242,4 +242,16 @@ Windows regressions exercise a real self-merge followed by no refresh, a
 subsequent guest edit that does refresh, and a write after snapshot capture
 that remains dirty. GPU changes in the merge test are mocked explicitly.
 
+## Task 4b–d: lazy readback is not enabled
+
+The native [readback conformance fixtures](docs/pass2-readback-boundary.md)
+pass: NOACCESS/guard faults compose with private write-watch; a mapped host-only
+alias can publish just a touched page while the guest remains inaccessible.
+Those mapped aliases do not provide native GetWriteWatch. Production coverage
+of all aliases, kernel I/O, allocation/decommit semantics and independent fault
+workers is still missing. Existing eager readback is retained. There is no
+working READBACK=lazy switch or adaptive fault policy in this build; do not
+interpret the two fixture tests as a working game integration. The requested
+lazy A/B stage must be skipped until those contracts are implemented.
+
 The remaining task comparisons will be added with their implementations.
