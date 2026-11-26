@@ -33,6 +33,12 @@ Other proposals inspected but not applied:
   lane behavior incomplete; requires stronger semantics and execution coverage.
 - victory-fork PR 188: a much larger Series S compositor/upscaler change;
   downloaded for review, not adopted or claimed working here.
+- victory-fork PR 684 / commit
+  `f6a09d3ba4ca425e71429ddbcb43b18ad507202a`: remapping every 32-bit integer
+  typed-buffer view to its float counterpart was implemented and tested in
+  isolation, then rejected after a matched Series X capture made both lead
+  characters bald, turned eyes black and dropped clothing geometry. Evidence
+  is retained outside Git under the `starport-bitexact` runtime state.
 - XCL remains separate research/validation work. No GPL-2.0-only XCL source
   was copied into this GPL-3 project.
 
