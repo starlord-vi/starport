@@ -37,6 +37,40 @@ fn light_refresh() -> bool {
 #[cfg(test)]
 mod fine_upload_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires VICTORY_CARD_WINDOWS_MB=512 and a hardware D3D12 device"]
+    fn card_window_uploads_cpu_edits_before_gpu_reads() {
+        let memory = crate::resource::Memory::descriptors(65536).unwrap();
+        let source = memory.address();
+        let h = host().expect("D3D12 hardware required");
+        let copy = find_any(source, 64).unwrap();
+        assert!(copy.carded(), "GPU-local loose-window admission required");
+        for pattern in [0xa5u8, 0x3c] {
+            unsafe { (source as *mut u8).write_bytes(pattern, 64) };
+            let readback = h.read_back_buffer(64).unwrap();
+            let list = h.new_list().unwrap();
+            copy.refresh(&list, source, 64);
+            let offset = copy.gpu(source) - unsafe { copy.buffer.GetGPUVirtualAddress() };
+            unsafe {
+                list.list
+                    .CopyBufferRegion(&readback, 0, &copy.buffer, offset, 64)
+            };
+            list.close();
+            h.execute(&[&list]);
+            let mut at = std::ptr::null_mut();
+            unsafe {
+                readback.Map(0, None, Some(&mut at)).unwrap();
+                assert_eq!(
+                    std::slice::from_raw_parts(at.cast::<u8>(), 64),
+                    [pattern; 64]
+                );
+                readback.Unmap(0, None);
+            }
+            list.reset();
+        }
+    }
+
     #[test]
     fn exact_partial_ranges_skip_unchanged_bytes_without_initializing_their_neighbors() {
         let memory = crate::resource::Memory::descriptors(65536).unwrap();
@@ -432,13 +466,16 @@ fn card_for(size: u64) -> Option<ID3D12Resource> {
 /// alone; what moves is what shaders read.
 fn window_card_most() -> u64 {
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *MOST.get_or_init(|| {
-        std::env::var("VICTORY_CARD_WINDOWS_MB")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(0)
-            << 20
-    })
+    *MOST
+        .get_or_init(|| window_card_bytes(std::env::var("VICTORY_CARD_WINDOWS_MB").ok().as_deref()))
+}
+
+fn window_card_bytes(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v <= 4096)
+        .unwrap_or(0)
+        << 20
 }
 
 /// Bytes alive of windows' card sides ([`window_card_most`]).
@@ -3758,7 +3795,17 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
 
 #[cfg(test)]
 mod window_tests {
-    use super::{WINDOW, cover, grid, holder, longest_tail, tail_of, window_of};
+    use super::{WINDOW, cover, grid, holder, longest_tail, tail_of, window_card_bytes, window_of};
+
+    #[test]
+    fn gpu_window_budget_is_bounded_and_opt_in() {
+        assert_eq!(window_card_bytes(None), 0);
+        assert_eq!(window_card_bytes(Some("512")), 512 << 20);
+        assert_eq!(window_card_bytes(Some("4096")), 4096 << 20);
+        for invalid in ["-1", "4097", "18446744073709551615", "bad"] {
+            assert_eq!(window_card_bytes(Some(invalid)), 0);
+        }
+    }
 
     /// An ask that may take any window takes the longest that holds all of
     /// it, and none that holds only a part.

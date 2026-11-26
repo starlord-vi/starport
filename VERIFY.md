@@ -540,3 +540,29 @@ Worker jobs can be skipped only when a published submission query proves
 every byte already current, and no in-flight shader write overlaps the range.
 Real guest writes still force refreshes. `0` restores the older refresh path.
 `starport::refresh` reports skipped jobs and their byte spans, not saved time.
+
+`VICTORY_CARD_WINDOWS_MB=512` enables the existing GPU-local copies of loose
+title-memory windows for an A/B. Unset/`0` keeps the old location. The parser
+accepts 0..4096 MiB; invalid values disable it. Admission also requires the
+existing host capability checks and 20% local-budget headroom. Restart to
+compare: each shadow chooses its location at creation. The CPU staging side
+remains allocated, so shared-memory usage does not disappear by this switch.
+
+## Captured shader checks
+
+Whole-wave mask simulation preserves both Wave64 mask halves and the FI/BC
+rules of `v_permlanex16`. Tests cover inactive sources, preserved destinations,
+high-half clobbers, partial restores and an executed NVIDIA Wave32 prefix sum.
+Source: Marvisak/VIctory #3393 at `9be9a09724925900670e4b954d64a1a0f31d441c`.
+
+Pixel signature rows retain console element order to match DXIL element IDs.
+Unread packed attributes inherit the used sibling's interpolation mode only
+when used modes agree; used attributes are never flattened to hide conflicts.
+This is the narrow signature portion of #3408 at
+`5696ced75b4a6eb494861daac57ff17f9913f6aa`, with conservative interpolation.
+
+The ignored `captured_world_pixels_validate_offline` test requires external
+`STARPORT_PIXEL_INPUTS`, an explicit `STARPORT_PIXEL_EXPECTED_COUNT`, and
+`STARPORT_SHADER_AUDIT_OUT`. It asserts every fixture translates as a pixel
+shader and validates. DXIL dumps stay outside Git. This is not a graphics
+pipeline or rendered-pixel equivalence test.
