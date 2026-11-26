@@ -637,7 +637,14 @@ impl Staging {
             let (buffer, data) = host()
                 .and_then(|h| h.upload_buffer(bytes))
                 .unwrap_or_else(|| {
-                    crate::host::fail(format_args!("no memory for a texture upload snapshot"))
+                    crate::host::fail(format_args!(
+                        "no memory for a {bytes}-byte texture upload snapshot of {} subresources \
+                         (source {} bytes, first mip {}, host texture {:#x})",
+                        selected.len(),
+                        self.bytes,
+                        self.first_mip,
+                        self.host_key
+                    ))
                 });
             for &(index, packed, from, end, hash) in &selected {
                 // SAFETY: both spans are within their checked CPU/upload

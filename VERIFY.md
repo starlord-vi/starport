@@ -20,6 +20,20 @@ in each run's settings/evidence.
 This baseline deliberately disables the new optimizations; conservative dirty
 tracking off can be slower than the previously measured 1.3–1.4 FPS build.
 
+For a reproducible `0x887A0005` device removal whose underlying reason is
+`0x887A0001`, rerun the same profile once with the CPU debug layer and DRED:
+
+```powershell
+.\Play-Starport.cmd --preset balanced --d3d12-debug --dred
+```
+
+This is deliberately not a performance run. `VICTORY_D3D12_DEBUG=1` captures
+the first invalid API/resource-state message; `VICTORY_D3D12_DRED=1` records
+the last GPU breadcrumbs and page-fault allocation names. The runner also
+forwards these environment variables for manual combinations. Do not enable
+GPU-based validation unless ordinary debug+DRED still produces no command:
+`VICTORY_D3D12_GBV=1` is substantially more intrusive.
+
 ```powershell
 Set-Location A:\starport\port
 Remove-Item Env:STARPORT_SKIP_TOP_MIP -ErrorAction SilentlyContinue

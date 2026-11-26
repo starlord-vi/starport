@@ -5,6 +5,7 @@ if not defined STARPORT_SERIES_S set "STARPORT_SERIES_S=1"
 rem Mip default: skip 2 on <=1080p, retain at least 3. --skip-mips 0 disables.
 rem STARPORT_SKIP_TOP_MIP=0/1 remains an explicit compatibility override.
 rem Renderer A/B commands and all defaults/kill switches: VERIFY.md and VERIFY2.md.
+rem Device-removal diagnosis: --d3d12-debug --dred (slow; diagnostics build only).
 rem Default performance profile: relay stage 2 + exact card rehash run joining.
 rem Pass --preset balanced to disable those two settings for an A/B.
 rem Pass 2 defaults: progressive tails=1, evictor V2=1, selfwrite=reset (safe compare).

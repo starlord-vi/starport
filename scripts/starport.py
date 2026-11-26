@@ -129,6 +129,10 @@ def main():
     parser.add_argument('--relay', action='store_true', help='Opt-in upstream asynchronous submission path')
     parser.add_argument('--bvh', action='store_true', help='Diagnostic RT builder attempt; incomplete upstream')
     parser.add_argument('--strict-waits', action='store_true', help='Keep unresolved queue waits; never force at present')
+    parser.add_argument('--d3d12-debug', action='store_true',
+                        help='Enable the D3D12 debug layer (diagnostics builds; slow)')
+    parser.add_argument('--dred', action='store_true',
+                        help='Record D3D12 device-removed breadcrumbs and page-fault data')
     args = parser.parse_args()
     mip_override = args.skip_mips
     if mip_override is None and args.skip_top_mip is not None:
@@ -199,7 +203,9 @@ def main():
                  'VICTORY_CARD_REHASH_RUNS', 'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB',
                  'VICTORY_HEAP_ROUND', 'VICTORY_KEYS', 'VICTORY_PIPELINE_BOOK',
                  'VICTORY_PIPELINE_WORKERS', 'VICTORY_PIPELINE_SLOW',
-                 'VICTORY_FULL_CARD_PASS', 'VICTORY_REUPLOAD_WHEN_FULL'):
+                 'VICTORY_FULL_CARD_PASS', 'VICTORY_REUPLOAD_WHEN_FULL',
+                 'VICTORY_D3D12_DEBUG', 'VICTORY_D3D12_DRED', 'VICTORY_D3D12_GBV',
+                 'VICTORY_GPU_TIMING', 'VICTORY_D3D12_BACKGROUND'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':
@@ -223,6 +229,10 @@ def main():
         settings['VICTORY_TEXTURE_NO_WAIT'] = '1'
     if args.strict_waits:
         settings['VICTORY_WAIT_FORCE'] = '0'
+    if args.d3d12_debug:
+        settings['VICTORY_D3D12_DEBUG'] = '1'
+    if args.dred:
+        settings['VICTORY_D3D12_DRED'] = '1'
     env.update(settings)
     backend_hash = sha256(args.backend)
     backend = state/'backends'/backend_hash/'victory.exe'
