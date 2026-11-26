@@ -21,6 +21,20 @@ pub(super) struct Copied {
     pending: BTreeSet<usize>,
 }
 
+impl Copied {
+    /// API writes have already been mirrored. Publish the same snapshot
+    /// under the copy-pass mutex so it cannot later replay an older API
+    /// observation over a newer raw-copy observation.
+    pub(super) fn mirror_api(&mut self, index: u32, handle: u64, host: &HostHeap) {
+        // SAFETY: the descriptor API owns a live destination slot.
+        let record = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        host.mirror_record(index, handle, record, false);
+        if let Some(previous) = self.records.get_mut(index as usize) {
+            *previous = record;
+        }
+    }
+}
+
 static STATS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
 fn on() -> bool {
@@ -232,6 +246,30 @@ mod tests {
                 .0
                 .iter()
                 .any(|&(i, _)| i == 3)
+        );
+        slot::<extern "system" fn(This) -> u32>(title, 0x10)(title);
+    }
+
+    #[test]
+    fn api_descriptor_updates_are_not_replayed_by_the_copy_pass() {
+        let title = descriptor::test_view_heap(8);
+        let heap = descriptor::heap(title);
+        let host = heap.host().expect("hardware descriptor heap required");
+        heap.sync_copied(host);
+        let mut view = [0u32; 10];
+        view[1] = 1;
+        view[7] = 4;
+        descriptor::create_srv(
+            std::ptr::null(),
+            std::ptr::null(),
+            &view,
+            heap.handle(3).unwrap(),
+        );
+        assert!(host.buffer_changes().contains(&3));
+        heap.sync_copied(host);
+        assert!(
+            host.buffer_changes().is_empty(),
+            "the API already mirrored this exact record"
         );
         slot::<extern "system" fn(This) -> u32>(title, 0x10)(title);
     }

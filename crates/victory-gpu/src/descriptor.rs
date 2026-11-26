@@ -194,13 +194,14 @@ fn mirror(handle: u64) {
     let Some((heap, index)) = shader_slot(handle) else {
         return;
     };
+    let mut copied = heap.copied.lock().unwrap_or_else(|e| e.into_inner());
     let mut pending = heap.pending.lock().unwrap_or_else(|e| e.into_inner());
     match heap.host.get() {
         None => pending.push(index),
         Some(host) => {
             drop(pending);
             if let Some(host) = host {
-                host.mirror(index, handle, false);
+                copied.mirror_api(index, handle, host);
             }
         }
     }
