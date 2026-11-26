@@ -18,6 +18,7 @@ rem Pass 2 defaults: progressive tails=1, evictor V2=1, selfwrite=reset (safe co
 rem STARPORT_SKIP_MIPS_TARGET_DIM=1024 explicitly selects a 1024px streaming target; 0 restores fixed N.
 rem STARPORT_PARALLEL_WORK=0, STARPORT_XXH3=0, STARPORT_RETAINED_MIP_READS=0 restore old CPU paths.
 rem STARPORT_MEM_BUDGET_MB=8192/6144 also caps idle caches; STARPORT_TRIM_CACHES=0 disables that cap.
+rem STARPORT_UPLOAD_POOL=0 restores per-copy allocations for an upload-pool A/B.
 rem STARPORT_BENCH=1 enables F8 30-second scene summaries. Lazy readback is not implemented.
 rem Series S two-plane presentation is implemented with offline GPU coverage;
 rem its world behavior still requires your run. --console series-x remains the baseline.

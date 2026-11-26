@@ -81,3 +81,24 @@ hardware and WARP (lane permutation requires hardware Wave32).
 Runtime image recovery and performance are still pending; no FPS gain is
 inferred from successful translation. `--capture-targets` is for diagnosis
 and perturbs timing. Ordinary runs are used for performance comparisons.
+
+## First agent runtime test
+
+The user explicitly authorized launches after the earlier CLI-only rule.
+Run `20261126T222907.867677Z` used ACCC commit `33d22de`, binary SHA-256
+`4d3c82da952410ef295e0b770a29d1867de125833b7b9dd4d8c05164721e68e1`,
+and a separate copy of the profile. Original binary and metadata checks passed;
+exit 0, no forced termination, no recorder loss or sequence gaps.
+
+A real keyboard Enter press advanced the player selection after focusing
+the game client. The world became visible through the final image: people,
+buildings, plants and textured surfaces. Black skin/shadow regions, overbright
+surfaces and geometry defects remain. This is partial visual recovery, not
+the requested image-quality acceptance. The last 30 seconds of this capture
+run averaged 1.46 FPS (606 ms median); it is not a benchmark.
+
+ACCC shaders now bind and dispatch; the two earlier refused Wave64 compute
+pipelines still fail. The renderer's aggregate dropped count also includes
+disabled structure-builder stages and binding failures, so it must not be
+labelled solely a missing-shader count. Further lighting, binding and CPU/GPU
+work is required.

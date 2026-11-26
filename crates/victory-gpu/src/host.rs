@@ -1437,6 +1437,20 @@ fn scratch_pool() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_SCRATCH_POOL").is_none_or(|v| v != "0"))
 }
 
+fn upload_pool() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    scratch_pool()
+        && *ON.get_or_init(|| std::env::var_os("STARPORT_UPLOAD_POOL").is_none_or(|v| v != "0"))
+}
+
+/// Bound rounding and retention. Large one-off transfers retain their
+/// exact-size allocation and existing lifetime.
+fn upload_bucket(size: u64) -> Option<u64> {
+    size.max(4096)
+        .checked_next_power_of_two()
+        .filter(|&n| n <= 8 << 20)
+}
+
 /// Things of some sizes that nothing holds now, kept for whoever next asks
 /// for one of the same size.
 struct Spare<T> {
@@ -1748,6 +1762,9 @@ struct Deferred {
     /// Destination, source, bytes.
     copies: Vec<Step>,
     uploads: Vec<ID3D12Resource>,
+    /// Exclusive mapped upload chunks, returned only when this list is
+    /// reset/dropped after all its GPU uses, like the existing `uploads`.
+    pooled_uploads: Vec<(Chunk, u64)>,
     /// The bytes of `uploads` (counted in [`ALIVE`] while they are held).
     upload_bytes: u64,
     /// Immutable texture versions named only by this submission's prelude.
@@ -1807,6 +1824,7 @@ impl Deferred {
 impl Drop for Deferred {
     fn drop(&mut self) {
         self.clear_prelude_uploads();
+        give_chunks(std::mem::take(&mut self.pooled_uploads));
         ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
     }
@@ -5561,8 +5579,20 @@ impl HostList {
     /// A mapped upload buffer of `size` bytes, alive until the list is
     /// reset.
     ///
-    /// shortcut: one buffer per copy; pool them once uploads are frequent.
+    /// Small buffers share the existing bounded scratch pool after their
+    /// list's final GPU use. Bucketed per-copy reuse is inspired by codec-d
+    /// 808342e93a268ded13e67f4aca016214c6d3230d, host.rs (GPL-3.0-or-later):
+    /// https://git.gtahub.st/Mskh/codec-d--cool_fox-OPTIMIZED
+    /// Starport retains its existing upload heap, memory caps and fences.
     pub(crate) fn upload(&self, host: &Host, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        if upload_pool()
+            && let Some(bucket) = upload_bucket(size)
+        {
+            let chunk = take_chunk(host, bucket)?;
+            let result = (chunk._buffer.clone(), chunk.data as *mut u8);
+            self.deferred().pooled_uploads.push((chunk, bucket));
+            return Some(result);
+        }
         let (buffer, data) = host.upload_buffer(size)?;
         name(&buffer, || format!("list upload {size:#x}"));
         self.deferred().hold_upload(buffer.clone(), size);
@@ -7535,7 +7565,88 @@ mod trail {
 
 #[cfg(test)]
 mod spare {
-    use super::Spare;
+    use super::*;
+
+    #[test]
+    fn upload_buckets_are_bounded_even_for_overflowing_requests() {
+        assert_eq!(upload_bucket(0), Some(4096));
+        assert_eq!(upload_bucket(4097), Some(8192));
+        assert_eq!(upload_bucket(8 << 20), Some(8 << 20));
+        assert_eq!(upload_bucket((8 << 20) + 1), None);
+        assert_eq!(upload_bucket(u64::MAX), None);
+    }
+
+    #[test]
+    fn upload_pool_preserves_gpu_copies_and_reuses_only_completed_reset_lists() {
+        use windows::core::Interface;
+        assert!(
+            upload_pool(),
+            "run this regression with default upload pooling enabled"
+        );
+        let host = host().expect("D3D12 test device required");
+        let a = host.new_list().unwrap();
+        let b = host.new_list().unwrap();
+        const SIZE: u64 = 4101;
+        let (first, first_data) = a.upload(host, SIZE).unwrap();
+        let (held, held_data) = b.upload(host, SIZE).unwrap();
+        assert_ne!(
+            first.as_raw(),
+            held.as_raw(),
+            "a live list's buffer cannot be lent out"
+        );
+        let output = host.read_back_buffer(SIZE).unwrap();
+        // SAFETY: exclusive mapped buffers contain at least SIZE bytes, and
+        // the open command list copies that range into a live readback buffer.
+        unsafe {
+            first_data.write_bytes(0xa5, SIZE as usize);
+            held_data.write_bytes(0x66, SIZE as usize);
+            a.list.CopyBufferRegion(&output, 0, &first, 0, SIZE);
+        }
+        a.close();
+        host.execute(&[&a]); // waits for the GPU before reset is permitted
+        a.reset();
+        let c = host.new_list().unwrap();
+        let (reused, reused_data) = c.upload(host, SIZE).unwrap();
+        assert_eq!(
+            reused.as_raw(),
+            first.as_raw(),
+            "completed chunk should be reused"
+        );
+        assert_ne!(
+            reused.as_raw(),
+            held.as_raw(),
+            "unreset list remains exclusive"
+        );
+        let second_output = host.read_back_buffer(SIZE).unwrap();
+        // SAFETY: as above; a's final GPU copy completed before reuse.
+        unsafe {
+            reused_data.write_bytes(0x3c, SIZE as usize);
+            c.list.CopyBufferRegion(&second_output, 0, &reused, 0, SIZE);
+        }
+        c.close();
+        host.execute(&[&c]);
+        for (buffer, expected) in [(&output, 0xa5u8), (&second_output, 0x3c)] {
+            let mut mapped = std::ptr::null_mut();
+            // SAFETY: both copies have completed; Map returns SIZE readable
+            // bytes and Unmap closes the read without changing contents.
+            unsafe {
+                buffer
+                    .Map(
+                        0,
+                        Some(&D3D12_RANGE {
+                            Begin: 0,
+                            End: SIZE as usize,
+                        }),
+                        Some(&mut mapped),
+                    )
+                    .unwrap();
+                let bytes = std::slice::from_raw_parts(mapped.cast::<u8>(), SIZE as usize);
+                assert!(bytes.iter().all(|&v| v == expected));
+                buffer.Unmap(0, None);
+                assert_eq!(*held_data, 0x66, "another list's upload was overwritten");
+            }
+        }
+    }
 
     /// Kept things come back by size, the last given first, and nothing is
     /// kept past the limit.

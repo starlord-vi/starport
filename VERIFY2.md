@@ -374,3 +374,18 @@ If the new data shows translation dominating preparing, the next CPU change
 should be a bounded reuse cache for validated immutable command/descriptor
 translations, invalidated by descriptor generation, source mapping and PSO
 changes; first isolate its cost from hashing and merge scans with these timers.
+# Upload pooling and indirect windows (27 November)
+
+Small per-copy list uploads (4 KiB through 8 MiB buckets) reuse the existing
+bounded scratch pool. Chunks remain exclusive to their command list until
+its completed reset/drop; larger transfers keep the previous allocation
+path. Existing disposable-cache caps still apply. `STARPORT_UPLOAD_POOL=0`
+restores per-copy allocations. The GPU regression checks two simultaneously
+owned buffers, completed-list reuse and both GPU copy results.
+
+The throughput preset also selects the existing `VICTORY_INDIRECT_WINDOW=1`
+path, which reuses clamped indirect arguments until an invalidating operation.
+Set `VICTORY_INDIRECT_WINDOW=0` to compare the prior per-record clamp path.
+Both overrides are recorded in each run's launch metadata. No performance
+gain is inferred from offline tests; runtime comparisons are pending.
+
