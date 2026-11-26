@@ -8,6 +8,8 @@ mod inspect;
 mod run;
 mod shader;
 mod translate;
+#[cfg(windows)]
+mod warm;
 
 use std::path::PathBuf;
 
@@ -84,6 +86,28 @@ enum Command {
         /// Worker threads (default: every logical core).
         #[arg(long)]
         jobs: Option<usize>,
+    },
+    /// Make the host pipelines of every pipeline the title ever created
+    /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
+    /// driver's cache on disk has them before a run needs one: once per change
+    /// of the translator or the driver. Goes on where it was stopped.
+    #[cfg(windows)]
+    Warm {
+        /// Processes at once (default: two thirds of the logical cores).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// At most this many pipelines.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Those made before too.
+        #[arg(long)]
+        again: bool,
+        /// Only the pipelines earlier runs drew with.
+        #[arg(long)]
+        used: bool,
+        /// (What the processes it starts are given.)
+        #[arg(long, hide = true)]
+        these: Option<String>,
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
@@ -172,6 +196,14 @@ fn main() -> Result<()> {
             }
             translate::run(paths, validate, pipelines, list, jobs)
         }
+        #[cfg(windows)]
+        Command::Warm {
+            jobs,
+            limit,
+            again,
+            used,
+            these,
+        } => warm::run(jobs, limit, again, used, these),
         Command::Run {
             exe,
             unimplemented,

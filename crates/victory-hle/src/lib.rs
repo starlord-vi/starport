@@ -22,6 +22,9 @@ pub use victory_gpu::console;
 #[cfg(windows)]
 pub use victory_gpu::{on_watchdog_stacks, start_watchdog};
 
+#[cfg(windows)]
+pub use victory_gpu::pipeline::known as known_pipelines;
+
 use victory_loader::{ImportResolver, Provenance, Resolution};
 use victory_pe::ImportSymbol;
 

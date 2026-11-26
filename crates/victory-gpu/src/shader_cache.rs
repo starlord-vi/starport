@@ -90,6 +90,11 @@ fn build() -> &'static [u8; 32] {
     })
 }
 
+/// What tells one set of translations from another ([`build`]).
+pub(crate) fn translation() -> [u8; 32] {
+    *build()
+}
+
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {

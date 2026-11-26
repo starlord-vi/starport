@@ -2965,6 +2965,18 @@ fn hand_back(back: &[Declared]) {
 }
 
 impl Host {
+    /// The driver's version, as DXGI reports it (0 when unavailable).
+    ///
+    /// Offline pipeline books include this value so a cache produced for a
+    /// different driver is never treated as compatible with this device.
+    pub(crate) fn driver(&self) -> i64 {
+        let adapter = self.adapter.as_ref();
+        // SAFETY: this is a read-only DXGI capability query on the adapter.
+        adapter.map_or(0, |adapter| {
+            unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.unwrap_or(0)
+        })
+    }
+
     /// Whether the host runs mesh shaders at shader model 6.6 (translated
     /// mesh shaders need both); logged once.
     pub(crate) fn mesh_shaders(&self) -> bool {
