@@ -61,3 +61,15 @@ See [starport-residency.md](starport-residency.md) for exact changes,
 additional Starport lowering, offline evidence and the four unresolved
 NVIDIA Wave64 compute PSOs. No upstream assumption of a size-only descriptor's
 texture dimension or undefined dead-descriptor substitution was imported.
+
+## Sixteen-bit face-network buffers
+
+Selectively adapted the typed-buffer half-view work from
+`fxceless/victory-fork` commit
+`58de9bf4c367d4e27f6dd5da523ca2f68951bc77` (GPL-3.0-or-later, pull request
+927 by tippythetaidum). Starport independently integrates only the coherent
+path needed here: fixed descriptor places are identified during lowering,
+16-bit patterns travel through same-layout unsigned buffer views, those twin
+views are isolated in fresh descriptor tables, and shader-cache serialization
+records the places. The commit's unrelated indirect-draw, query, device,
+occlusion and SDWA changes were not imported.
