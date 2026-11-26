@@ -24,9 +24,55 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 use crate::host::{HostList, host};
 use crate::watch::PAGE;
 
+// Exact range bookkeeping / unchanged-worker filtering adapted from
+// Mskh/codec-d--cool_fox-OPTIMIZED at
+// 808342e93a268ded13e67f4aca016214c6d3230d (GPL-3.0-or-later).
+pub(crate) static FAST_REFRESH: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+fn light_refresh() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STARPORT_LIGHT_REFRESH").is_none_or(|v| v != "0"))
+}
+
 #[cfg(test)]
 mod fine_upload_tests {
     use super::*;
+    #[test]
+    fn exact_partial_ranges_skip_unchanged_bytes_without_initializing_their_neighbors() {
+        let memory = crate::resource::Memory::descriptors(65536).unwrap();
+        let source = memory.address() as usize;
+        unsafe { (source as *mut u8).write_bytes(0x61, 65536) };
+        let h = host().unwrap();
+        let (buffer, data) = h.shared_buffer(65536).unwrap();
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let copy = Shadow::new(buffer, data, gpu, source as u64, 65536);
+        assert_eq!(copy.update(source + 17, 200), 200);
+        assert_eq!(copy.update(source + 17, 200), 0);
+        assert_eq!(
+            copy.update(source + 512, 20),
+            20,
+            "an uncopied neighbor on the same page must remain stale"
+        );
+        assert_eq!(unsafe { *data.add(512) }, 0x61);
+        assert_eq!(copy.update(source + 17, 200), 0);
+        crate::watch::ask_once(&[(source, source + 65536)]);
+        assert!(copy.nothing_new(source + 17, 200));
+        assert!(!copy.nothing_new(source + 1024, 200));
+        crate::watch::ask_once_end();
+        unsafe { (source as *mut u8).add(20).write(0x72) };
+        crate::watch::ask_once(&[(source, source + 65536)]);
+        assert!(!copy.nothing_new(source + 17, 200));
+        assert_eq!(copy.update(source + 17, 200), 200);
+        assert_eq!(unsafe { *data.add(20) }, 0x72);
+        copy.writing(source + 20, 4);
+        assert!(
+            !copy.nothing_new(source + 17, 200),
+            "an in-flight shader write must use the normal gap path"
+        );
+        copy.copy_back_done(&[(source + 20, source + 24)]);
+        crate::watch::ask_once_end();
+    }
+
     #[test]
     fn self_merge_is_filtered_but_a_later_guest_write_is_uploaded() {
         use windows_sys::Win32::System::Memory::*;
@@ -161,6 +207,9 @@ pub(crate) struct Shadow {
     /// Per page of title memory from `start`'s on: the write-watch asking
     /// after which it was last copied (0: never).
     copied: Mutex<Vec<u64>>,
+    /// The most recent and largest exact ranges refreshed completely.
+    /// Partial page ends must not make the rest of their page current.
+    ranged: Mutex<[(usize, usize, u64); 2]>,
     /// Whether the memory is write-watched: unknown, yes, no.
     watched: AtomicU8,
     self_merged: AtomicBool,
@@ -2087,6 +2136,7 @@ impl Shadow {
             start,
             len,
             copied: Mutex::new(vec![0; pages as usize]),
+            ranged: Mutex::new([(0, 0, 0); 2]),
             watched: AtomicU8::new(0),
             self_merged: AtomicBool::new(false),
             pending: Mutex::default(),
@@ -2873,6 +2923,62 @@ impl Shadow {
         to - from
     }
 
+    fn ranged(&self, from: usize, to: usize) -> u64 {
+        if !light_refresh() {
+            return 0;
+        }
+        self.ranged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|r| r.0 <= from && to <= r.1)
+            .map(|r| r.2)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Skip unchanged work before waking scan workers, using the same
+    /// submission query that update() would consume. Pending GPU writes
+    /// still require the normal gap-by-gap refresh path.
+    pub(crate) fn nothing_new(&self, address: usize, len: usize) -> bool {
+        if !light_refresh() {
+            return false;
+        }
+        if self.place.is_some() {
+            return true;
+        }
+        let (start, end) = (self.start as usize, (self.start + self.len) as usize);
+        let (from, to) = (address.max(start), address.saturating_add(len).min(end));
+        if from >= to {
+            return true;
+        }
+        if self.watched.load(Ordering::Relaxed) != 1 {
+            return false;
+        }
+        if self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|&(a, b)| a < to && from < b)
+        {
+            return false;
+        }
+        let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        let same =
+            crate::watch::nothing_new(from, to, start / PAGE, &copied, self.ranged(from, to));
+        if same {
+            FAST_REFRESH[0].fetch_add(1, Ordering::Relaxed);
+            FAST_REFRESH[1].fetch_add((to - from) as u64, Ordering::Relaxed);
+            #[cfg(feature = "diagnostics")]
+            {
+                crate::copystat::add(crate::copystat::C::Checked, (to - from) as u64);
+                crate::copystat::add(crate::copystat::C::Unchanged, (to - from) as u64);
+            }
+        }
+        same
+    }
+
     /// Copies the pages of `[from, to)` written after their last copy
     /// (`written`: last writes by page, in page order; `now`: this
     /// asking), whole pages within the buffer.
@@ -2882,6 +2988,7 @@ impl Shadow {
         }
         let base = self.start as usize / PAGE;
         let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        let ranged = self.ranged(from, to);
         let mut writes = written.iter().peekable();
         let (mut bytes, mut run): (usize, Option<(usize, bool)>) = (0, None);
         let last = (to - 1) / PAGE;
@@ -2894,8 +3001,9 @@ impl Shadow {
                 _ => 0,
             };
             let at = &mut copied[page - base];
-            if *at == 0 || write > *at {
-                let initialized = *at != 0;
+            let taken = (*at).max(ranged);
+            if taken == 0 || write > taken {
+                let initialized = taken != 0;
                 if let Some((first, old)) = run
                     && old != initialized
                 {
@@ -2922,6 +3030,13 @@ impl Shadow {
                 ((last + 1) * PAGE).min(to),
                 initialized,
             );
+        }
+        if light_refresh() {
+            let mut ranged = self.ranged.lock().unwrap_or_else(|e| e.into_inner());
+            ranged[0] = (from, to, now);
+            if to - from >= ranged[1].1 - ranged[1].0 {
+                ranged[1] = (from, to, now);
+            }
         }
         bytes
     }

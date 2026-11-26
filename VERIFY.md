@@ -531,3 +531,12 @@ The first synchronization scans it once; later passes query dirty pages and
 retain independent cursors in the shared journal. Allocation failure falls
 back to ordinary memory plus conservative full scans, reported explicitly.
 Placed heaps retain their title-owned backing.
+
+## Exact buffer refresh ranges
+
+`STARPORT_LIGHT_REFRESH=1` (default) remembers the last and largest exact
+refreshed ranges. A refreshed partial page does not initialize its neighbors.
+Worker jobs can be skipped only when a published submission query proves
+every byte already current, and no in-flight shader write overlaps the range.
+Real guest writes still force refreshes. `0` restores the older refresh path.
+`starport::refresh` reports skipped jobs and their byte spans, not saved time.

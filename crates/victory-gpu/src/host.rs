@@ -5966,6 +5966,10 @@ impl Batch {
             crate::watch::ask_ahead(&ranges);
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        let filtering = std::time::Instant::now();
+        self.refreshes
+            .retain(|(shadow, from, to)| !shadow.nothing_new(*from, to - from));
+        PREPARING[0].fetch_add(filtering.elapsed().as_micros() as u64, Ordering::Relaxed);
         if wide_refresh() && self.refreshes.len() >= 4 {
             // Each copy on its own, several at a time: a copy's refresh
             // writes that copy and reads title memory, nothing of another's.
@@ -6611,6 +6615,12 @@ impl Meter {
         let drops = crate::pipeline::take_drops();
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             crate::descriptor::copied_line(frames);
+            let [calls, bytes] = crate::shadow::FAST_REFRESH
+                .each_ref()
+                .map(|n| n.swap(0, Ordering::Relaxed));
+            tracing::info!(target:"starport::refresh", skipped_jobs_per_frame=calls as f64/frames,
+                skipped_bytes_per_frame=bytes as f64/frames,
+                "unchanged buffer refreshes filtered under the submission dirty-page query");
             self.logged = std::time::Instant::now();
             tracing::info!(
                 "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",

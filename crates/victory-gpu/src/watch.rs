@@ -320,6 +320,36 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
         })
 }
 
+/// A refresh can skip its worker job only under the submission's already
+/// published dirty-page query. Otherwise it must ask Windows normally.
+pub(crate) fn nothing_new(
+    start: usize,
+    end: usize,
+    base: usize,
+    taken: &[u64],
+    ranged: u64,
+) -> bool {
+    if start >= end {
+        return true;
+    }
+    let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    let Some(lo) = first.checked_sub(base) else {
+        return false;
+    };
+    let Some(hi) = last.checked_sub(base) else {
+        return false;
+    };
+    let Some(pages) = taken.get(lo..hi) else {
+        return false;
+    };
+    let j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    j.ahead.iter().any(|&(a, b)| a <= first && last <= b)
+        && (ranged != 0 || pages.iter().all(|&stamp| stamp != 0))
+        && j.written
+            .range(first..last)
+            .all(|(&p, &stamp)| stamp <= taken[p - base].max(ranged))
+}
+
 /// The pages of `[start, end)` (whole pages) as last written, for pages
 /// written since tracking began: `(page number, asking)` in page order, and
 /// this asking's number, which is higher than any in the list but those the
