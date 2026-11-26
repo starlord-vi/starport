@@ -498,3 +498,15 @@ it is not a reliable way to disable upscaling. The full ACCC/FSPX translation
 path now passes all 29 locally recorded containers through DXIL validation
 and NVIDIA hardware PSO creation. That offline check is not visual acceptance.
 See [the updated capture findings](docs/black-world-20261127.md).
+
+`STARPORT_TEXTURE_STAGE_MS=16` limits the opportunistic bindless texture pass
+to a soft 16 ms slice (1..1000; unset/invalid retains the prior 250 ms).
+It completes its current texture, leaves unprocessed slots queued and keeps
+explicit table reads synchronous. The frame logger reports streaming time
+inside the heap-buffer total; these two values must not be added together.
+The throughput preset does not yet change this default.
+
+`VICTORY_WINDOW_KB=256` and `VICTORY_WINDOW_TAILS=1` expose the existing finer
+buffer-window path for memory A/B tests. Sized reads keep their complete
+ranges; unsized root reads retain the full tail of their 4 MiB cell. Defaults
+remain unchanged until a runtime comparison establishes correctness.

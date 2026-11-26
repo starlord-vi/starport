@@ -6589,6 +6589,8 @@ impl Meter {
         let picked = crate::draw::HEAP_BUFFER_PASSES.swap(0, Ordering::Relaxed) as f64 / frames;
         let picked_ms =
             crate::draw::HEAP_BUFFER_MICROS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
+        let streaming_ms =
+            crate::draw::HEAP_TEXTURE_MICROS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
         let picked_changed =
             crate::draw::HEAP_BUFFER_CHANGED_SLOTS.swap(0, Ordering::Relaxed) as f64 / frames;
         let picked_periodic =
@@ -6673,7 +6675,7 @@ impl Meter {
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                  GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \
-                 {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms \
+                 {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms (streaming {streaming_ms:.1} ms included) \
                  ({picked_changed:.0} changed slots, {picked_periodic:.0} periodic unchanged, round {heap_round}); \
                  texture slots written so far: {placed} placed, {objects} of objects; \
                  textures picked by index: {picked_textures} uploaded so far ({picked_mb} MB), \

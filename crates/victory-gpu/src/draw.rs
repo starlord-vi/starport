@@ -330,6 +330,8 @@ pub(crate) static HEAP_VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// index ([`State::heap_buffers`]), and the microseconds they took.
 pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
+/// Sequential wall time inside the streaming texture part of that pass.
+pub(crate) static HEAP_TEXTURE_MICROS: AtomicU64 = AtomicU64::new(0);
 /// Descriptor-write notifications handled by those passes, and unchanged
 /// slots revisited by the periodic full pass.
 pub(crate) static HEAP_BUFFER_CHANGED_SLOTS: AtomicU64 = AtomicU64::new(0);
@@ -357,6 +359,20 @@ fn parse_heap_round(value: Option<&str>) -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|round| (1..=1024).contains(round))
         .unwrap_or(16)
+}
+
+fn texture_stage_ms(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| (1..=1000).contains(v))
+        .unwrap_or(250)
+}
+
+fn texture_stage_span() -> std::time::Duration {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    std::time::Duration::from_millis(*MS.get_or_init(|| {
+        texture_stage_ms(std::env::var("STARPORT_TEXTURE_STAGE_MS").ok().as_deref())
+    }))
 }
 
 /// How often a bindless-buffer pass revisits unchanged view-heap slots.
@@ -1661,7 +1677,12 @@ impl State {
             }
             shadow.refresh(list, *from, to - from);
         }
+        let texture_began = std::time::Instant::now();
         self.heap_textures(list, heap, host);
+        HEAP_TEXTURE_MICROS.fetch_add(
+            texture_began.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
         HEAP_BUFFER_PASSES.fetch_add(1, Ordering::Relaxed);
         HEAP_BUFFER_MICROS.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         static LOGGED: AtomicU64 = AtomicU64::new(0);
@@ -1764,10 +1785,12 @@ impl State {
         // records the frame, and making and staging 192 MB of textures took
         // 1.6-2.2 s of each of the world's first twenty frames (run 20).
         // The rest waits for the next frames, as it does past the bytes.
-        const SPAN: std::time::Duration = std::time::Duration::from_millis(250);
+        // A soft bound: finish the texture already being staged, then leave
+        // remaining slots queued. Explicit table reads remain synchronous.
+        let span = texture_stage_span();
         let began = std::time::Instant::now();
         for (index, write) in due {
-            if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > SPAN {
+            if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > span {
                 break;
             }
             // A placed texture whose memory is not mapped (not streamed in
@@ -3116,7 +3139,17 @@ pub(crate) fn stencil_ref(list: &HostList, reference: u32) {
 
 #[cfg(test)]
 mod heap_round_tests {
-    use super::parse_heap_round;
+    use super::{parse_heap_round, texture_stage_ms};
+
+    #[test]
+    fn streaming_time_slice_is_bounded_and_defaults_to_the_previous_limit() {
+        assert_eq!(texture_stage_ms(None), 250);
+        assert_eq!(texture_stage_ms(Some("16")), 16);
+        assert_eq!(texture_stage_ms(Some(" 1000 ")), 1000);
+        for invalid in ["0", "-1", "1001", "inf", "bad", "18446744073709551616"] {
+            assert_eq!(texture_stage_ms(Some(invalid)), 250);
+        }
+    }
 
     #[test]
     fn heap_round_is_bounded_and_keeps_the_established_default() {

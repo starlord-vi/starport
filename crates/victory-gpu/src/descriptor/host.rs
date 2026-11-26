@@ -3065,6 +3065,32 @@ mod tests {
         assert!(buffer_view_ok(DXGI_FORMAT_UNKNOWN, 1, 10, 12, false, 4096));
     }
 
+    /// A time-sliced pass must not dequeue the slots it never reached.
+    /// Rewriting a slot while the pass is yielded also keeps the new write.
+    #[test]
+    fn texture_queue_preserves_unprocessed_work_after_a_yield() {
+        let mut q = TextureQueue::default();
+        for index in 0..9 {
+            q.written(index, 1, 1, false);
+        }
+        let batch = q.due(1, 9);
+        for &(index, write) in &batch[..2] {
+            q.done(index, write);
+        }
+        let (rewritten, old_write) = batch[2];
+        q.written(rewritten, 2, 2, false);
+        q.done(rewritten, old_write);
+        let remaining = q.due(2, 9);
+        assert_eq!(remaining.len(), 7);
+        for &(index, _) in &batch[2..] {
+            assert!(remaining.iter().any(|&(pending, _)| pending == index));
+        }
+        for (index, write) in remaining {
+            q.done(index, write);
+        }
+        assert!(q.due(3, 9).is_empty());
+    }
+
     /// The queue of textures picked by index serves the slots looked at
     /// before first, then the newest write and the oldest in turns; a
     /// slot whose memory is not there is looked at again after
