@@ -23,6 +23,7 @@ static CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
 static TOTALS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
 static TRIGGER: AtomicU64 = AtomicU64::new(0);
 static HELD: AtomicBool = AtomicBool::new(false);
+static AUTO_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -31,6 +32,23 @@ pub(crate) fn enabled() -> bool {
 fn bench_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("STARPORT_BENCH").is_some_and(|v| v == "1"))
+}
+
+fn auto_bench_after_us() -> Option<u64> {
+    static AFTER: OnceLock<Option<u64>> = OnceLock::new();
+    *AFTER.get_or_init(|| {
+        std::env::var("STARPORT_BENCH_AFTER_SECONDS")
+            .ok()
+            .and_then(|value| parse_auto_bench_after(&value))
+    })
+}
+
+fn parse_auto_bench_after(value: &str) -> Option<u64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0 && *seconds <= 86_400.0)
+        .map(|seconds| (seconds * 1_000_000.0).round() as u64)
 }
 pub(crate) fn collecting() -> bool {
     enabled() || bench_enabled()
@@ -251,7 +269,12 @@ pub(crate) fn present() {
     for (i, total) in TOTALS.iter().enumerate() {
         row[i + 1] = total.swap(0, Relaxed);
     }
-    let request = TRIGGER.swap(0, Relaxed);
+    let manual_request = TRIGGER.swap(0, Relaxed);
+    let automatic_request = auto_bench_after_us()
+        .filter(|after| now >= *after)
+        .filter(|_| !AUTO_TRIGGERED.swap(true, Relaxed))
+        .map_or(0, |_| now.max(1));
+    let request = manual_request.max(automatic_request);
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let previous = state.previous;
     let draws = crate::draw::drawn();
@@ -276,7 +299,7 @@ pub(crate) fn present() {
         state.interval.push(row);
     }
     if request != 0 {
-        tracing::info!(target:"starport::bench",trigger_us=request,"F8 benchmark started/restarted; boundary intervals excluded, 30-second window");
+        tracing::info!(target:"starport::bench",trigger_us=request,automatic=automatic_request != 0,"benchmark started/restarted; boundary intervals excluded, 30-second window");
         state.bench = Some(Bench {
             start: request,
             samples: Samples::default(),
@@ -331,6 +354,15 @@ fn complete_interval(previous: u64, now: u64, start: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_benchmark_delay_is_bounded_and_in_microseconds() {
+        assert_eq!(parse_auto_bench_after("90"), Some(90_000_000));
+        assert_eq!(parse_auto_bench_after("0.25"), Some(250_000));
+        for invalid in ["-1", "86400.1", "NaN", "inf", "nope"] {
+            assert_eq!(parse_auto_bench_after(invalid), None, "{invalid}");
+        }
+    }
     #[test]
     fn benchmark_export_replaces_atomically_and_rejects_source_tree_destinations() {
         let dir = tempfile::tempdir().unwrap();

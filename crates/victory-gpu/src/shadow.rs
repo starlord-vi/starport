@@ -3248,8 +3248,7 @@ pub(crate) fn unregister(resource: usize, start: u64) {
 }
 
 /// The title buffer holding `address`, as (start, length), without making
-/// its copy (diagnostics: which buffer a dropped program's root view names).
-#[cfg(feature = "diagnostics")]
+/// its copy. Diagnostics use this to name a dropped program's root view.
 pub(crate) fn extent(address: u64) -> Option<(u64, u64)> {
     buffers()
         .range(..=(address, usize::MAX))

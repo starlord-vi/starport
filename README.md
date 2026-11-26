@@ -211,6 +211,7 @@ time on the test machines. Set them in PowerShell before running the script.
 |---|---|
 | `VICTORY_CAPTURE=<dir>` + `VICTORY_CAPTURE_FRAMES=<list>` | save those frames as PNG (diagnostics build) |
 | `VICTORY_KEYS=30:Enter,35:X` | press keys at those seconds (diagnostics build) |
+| `STARPORT_BENCH=1` + `STARPORT_BENCH_AFTER_SECONDS=90` | start one 30-second benchmark automatically after 90 seconds; useful for unattended, fixed-input runs |
 | `VICTORY_D3D12_DRED=1` | on a GPU failure, report the commands in flight |
 | `VICTORY_PIPELINE_WAIT_MS=24` | shorter per-frame wait for pipelines still being built |
 
