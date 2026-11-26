@@ -65,6 +65,8 @@ dimension targets, self-write filtering, bounded CPU workers and memory-cache
 caps. It also describes F8 30-second scene captures and the remaining lazy
 readback/async limitations. Set STARPORT_SKIP_MIPS_TARGET_DIM=1024 explicitly
 to select the dimension rule; 0 restores the fixed-N policy above.
+See [second-pass offline validation](docs/pass2-validation.md) for the build
+identity, test results, remaining architecture work and unverified runtime targets.
 The title chooses resolution and texture pools from the console
 profile; the spoof does not force a particular resolution. Override `--game`,
 `--assets`, `--backend` and `--state` for another layout. Direct Python use
