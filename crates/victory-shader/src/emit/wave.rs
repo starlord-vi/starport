@@ -16,6 +16,9 @@ use std::collections::HashMap;
 use crate::gfx10::{Dpp, Fields, NULL, Operand};
 use crate::ir::{EXEC, Inst, Program, Reg, Value};
 
+// Mask-pair and permlanex16 corrections/tests adapted from Marvisak/VIctory
+// PR #3393, 9be9a09724925900670e4b954d64a1a0f31d441c (GPL-3.0-or-later).
+
 /// An associative operation and its identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -137,6 +140,18 @@ pub(crate) struct Section {
     pub reads: HashMap<Value, Shape>,
 }
 
+type Mask = (Value, Value);
+
+fn mask_pair(value: impl Fn(Reg) -> Option<Value>, code: u8, wave64: bool) -> Option<Mask> {
+    let lo = value(Reg::S(code))?;
+    let hi = if wave64 {
+        value(Reg::S(code.checked_add(1)?))?
+    } else {
+        lo
+    };
+    Some((lo, hi))
+}
+
 /// Every whole-wave section of `block`, by start index.
 pub(crate) fn sections(p: &Program, block: usize) -> HashMap<usize, Section> {
     let insts = &p.blocks[block].insts;
@@ -145,10 +160,12 @@ pub(crate) fn sections(p: &Program, block: usize) -> HashMap<usize, Section> {
     let mut i = 0;
     while i < insts.len() {
         let inst = &insts[i];
-        // EXEC becomes every lane: `s_or_saveexec -1` or `s_nand_saveexec 0`.
-        let all = match inst.name() {
-            "s_or_saveexec_b64" | "s_or_saveexec_b32" => Some(Operand::Const(193)),
-            "s_nand_saveexec_b64" | "s_nand_saveexec_b32" => Some(Operand::Const(128)),
+        // A wrong-width saveexec does not activate every console lane.
+        let all = match (p.wave64, inst.name()) {
+            (true, "s_or_saveexec_b64") | (false, "s_or_saveexec_b32") => Some(Operand::Const(193)),
+            (true, "s_nand_saveexec_b64") | (false, "s_nand_saveexec_b32") => {
+                Some(Operand::Const(128))
+            }
             _ => None,
         };
         let start = all.is_some_and(
@@ -158,16 +175,16 @@ pub(crate) fn sections(p: &Program, block: usize) -> HashMap<usize, Section> {
             Fields::Sop {
                 dst: Some(Operand::Scalar { code, .. }),
                 ..
-            } if start => inst.write(Reg::S(*code)),
+            } if start => mask_pair(|r| inst.write(r), *code, p.wave64).map(|m| (*code, m)),
             _ => None,
         };
-        let Some(saved) = saved else {
+        let Some((code, saved)) = saved else {
             i += 1;
             continue;
         };
         let end = (i + 1..insts.len()).find(|&j| {
-            insts[j].write(Reg::S(EXEC)).is_some()
-                && insts[j].read(Reg::S(saved_code(inst))) == Some(saved)
+            mask_pair(|r| insts[j].write(r), EXEC, p.wave64).is_some()
+                && mask_pair(|r| insts[j].read(r), code, p.wave64) == Some(saved)
         });
         let Some(end) = end else {
             break;
@@ -196,16 +213,6 @@ pub(crate) fn sections(p: &Program, block: usize) -> HashMap<usize, Section> {
         i = end + 1;
     }
     out
-}
-
-fn saved_code(inst: &Inst) -> u8 {
-    match &inst.fields {
-        Fields::Sop {
-            dst: Some(Operand::Scalar { code, .. }),
-            ..
-        } => *code,
-        _ => NULL,
-    }
 }
 
 /// The lane `l` reads with DPP, whether it reads 0 instead, and whether it
@@ -289,8 +296,9 @@ fn lane_number(op: &Operand) -> Option<u32> {
 
 type Left = (HashMap<Value, Vec<Sym>>, HashMap<Value, Sym>);
 
-fn simulate(insts: &[Inst], wave: u32, saved: Value) -> Left {
-    let all = if wave == 64 {
+fn simulate(insts: &[Inst], wave: u32, saved: Mask) -> Left {
+    let wave64 = wave == 64;
+    let all = if wave64 {
         u64::MAX
     } else {
         u64::from(u32::MAX)
@@ -331,9 +339,12 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> Left {
             continue;
         }
         if let Fields::Sop { dst, src, .. } = &inst.fields {
-            if name.starts_with("s_and_b")
-                && src.iter().any(|o| matches!(*o, Operand::Scalar { code, .. } if inst.read(Reg::S(code)).is_some_and(|v| masked.contains(&v))))
-                && let Some(&(_, w)) = inst.writes.iter().find(|w| matches!(w.0, Reg::S(_)))
+            let and_op = if wave64 { "s_and_b64" } else { "s_and_b32" };
+            if name == and_op
+                && src.iter().any(|o| matches!(*o, Operand::Scalar { code, .. }
+                    if mask_pair(|r| inst.read(r), code, wave64).is_some_and(|m| masked.contains(&m))))
+                && let Some(Operand::Scalar { code, .. }) = *dst
+                && let Some(w) = mask_pair(|r| inst.write(r), code, wave64)
             {
                 masked.push(w);
             }
@@ -465,7 +476,9 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> Left {
                 .collect(),
             ("v_cndmask_b32", Some(a)) => {
                 let mask = match v.src.get(2) {
-                    Some(&Operand::Scalar { code, .. }) => inst.read(Reg::S(code)),
+                    Some(&Operand::Scalar { code, .. }) => {
+                        mask_pair(|r| inst.read(r), code, wave64)
+                    }
                     _ => None,
                 };
                 let b = src(1).unwrap_or_default();
@@ -475,7 +488,7 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> Left {
                             Sym::Red {
                                 op: None,
                                 src: x,
-                                mask: m,
+                                mask: m.0,
                                 ident,
                                 lanes: 1 << l,
                             }
@@ -486,12 +499,15 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> Left {
             }
             ("v_permlanex16_b32", Some(a)) => {
                 // Lanes of each row read the other row of their half; lane
-                // i's pick is nibble i of {src2, src1}.
+                // i's pick is nibble i of {src2, src1}. FI permits fetching
+                // inactive sources; otherwise BC selects zero vs preservation.
                 let sel = |k: usize| match v.src.get(k) {
                     Some(&Operand::Const(c)) => crate::resource::inline(c),
                     Some(&Operand::Literal(x)) => Some(x),
                     _ => None,
                 };
+                let fi = v.opsel & 1 != 0;
+                let bound_ctrl = v.opsel & 2 != 0;
                 match (sel(1), sel(2)) {
                     (Some(s1), Some(s2)) => {
                         let s = u64::from(s1) | u64::from(s2) << 32;
@@ -499,7 +515,15 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> Left {
                             .map(|l| {
                                 let other = (l & !31) | ((l & 16) ^ 16);
                                 let pick = (s >> (4 * (l & 15)) & 15) as u32;
-                                a[(other | pick) as usize]
+                                let src = other | pick;
+                                if fi || exec >> src & 1 != 0 {
+                                    a[src as usize]
+                                } else if bound_ctrl {
+                                    Sym::K(0)
+                                } else {
+                                    writes &= !(1u64 << l);
+                                    Sym::Unknown
+                                }
                             })
                             .collect()
                     }
@@ -745,6 +769,291 @@ mod tests {
 
     const S_ENDPGM: u32 = 0xBF81_0000;
 
+    const fn sop2(sdst: u8, op: u8, ssrc0: u8, ssrc1: u8) -> u32 {
+        0x8000_0000 | (op as u32) << 23 | (sdst as u32) << 16 | (ssrc1 as u32) << 8 | ssrc0 as u32
+    }
+
+    const fn vop3_opsel(vdst: u8, op: u16, opsel: u8, src0: u16, src1: u16, src2: u16) -> [u32; 2] {
+        [
+            0xD400_0000 | (op as u32) << 16 | ((opsel as u32) & 0xF) << 11 | vdst as u32,
+            (src0 as u32 & 0x1FF) | ((src1 as u32 & 0x1FF) << 9) | ((src2 as u32 & 0x1FF) << 18),
+        ]
+    }
+
+    /// Appends a wave32 inclusive row prefix sum (`v_add_nc_u32` DPP `row_shr:1,2,4,8`)
+    /// on `v1`, initializes `v2 = old_k`, narrows `EXEC` to `exec_mask`, runs
+    /// `v_permlanex16_b32 v2, v1, -1, -1` with `opsel`, adds `v2` into `v1`, and
+    /// restores `EXEC` from `s0`.
+    fn wave32_permlanex16_prefix_words(exec_mask: u32, old_k: u8, opsel: u8) -> Vec<u32> {
+        let mut w = vec![sop1(0, 0x3D, 193)]; // s_or_saveexec_b32 s0, -1
+        w.extend(vop3(1, 0x101, 128, 256, 0)); // v_cndmask_b32 v1, 0, v0, s0
+        for shift in [1u16, 2, 4, 8] {
+            w.push(vop2(1, 0x25, 0xFA, 1));
+            w.push(dpp16(1, 0x110 + shift, 0xF, 0xF, false));
+        }
+        w.push(vop1(2, 0x01, 128 + u16::from(old_k))); // v_mov_b32 v2, old_k
+        w.push(sop1(EXEC, 0x03, 255)); // s_mov_b32 exec_lo, exec_mask
+        w.push(exec_mask);
+        // v_permlanex16_b32 v2, v1, -1, -1 op_sel:[fi, bound_ctrl, 0, 0]
+        // (all nibbles = 15, so lanes 16..31 select lane 15).
+        w.extend(vop3_opsel(2, 0x378, opsel, 257, 193, 193));
+        w.push(vop2(1, 0x25, 258, 1)); // v_add_nc_u32 v1, v2, v1
+        w.push(sop1(EXEC, 0x03, 0)); // s_mov_b32 exec_lo, s0
+        w
+    }
+
+    #[test]
+    fn v_permlanex16_honors_exec_fi_and_bound_ctrl() {
+        let run = |exec_mask: u32, old_k: u8, opsel: u8| {
+            let w = wave32_permlanex16_prefix_words(exec_mask, old_k, opsel);
+            let p = build(&w, false);
+            let insts = &p.blocks[0].insts;
+            let saved = insts[0].write(Reg::S(0)).unwrap();
+            let v0_in = insts[1].read(Reg::V(0)).unwrap();
+            let v2_val = insts[insts.len() - 4].write(Reg::V(2)).unwrap();
+            let v1_val = insts[insts.len() - 3].write(Reg::V(1)).unwrap();
+            let sec = &sections(&p, 0)[&0];
+            (
+                sec.shapes.get(&v2_val).copied(),
+                sec.shapes.get(&v1_val).copied(),
+                v0_in,
+                saved,
+            )
+        };
+
+        // Under EXEC = 0xFFFF_0000, lane 15 is inactive:
+        // FI=0, BOUND_CTRL=0 preserves old v2 (= 7) in every lane and must not
+        // produce a wave-wide prefix sum.
+        let (v2_fi0_bc0, v1_fi0_bc0, _, _) = run(0xFFFF_0000, 7, 0);
+        assert_eq!(v2_fi0_bc0, Some(Shape::K(7)));
+        assert_eq!(v1_fi0_bc0, None);
+
+        // FI=0, BOUND_CTRL=1 writes 0 into lanes 16..31 (keeping old=0 in 0..15),
+        // leaving v2 = 0 everywhere and never fetching inactive lane 15.
+        let (v2_fi0_bc1_zero, v1_fi0_bc1_zero, _, _) = run(0xFFFF_0000, 0, 2);
+        assert_eq!(v2_fi0_bc1_zero, Some(Shape::K(0)));
+        assert_eq!(v1_fi0_bc1_zero, None);
+
+        // FI=0, BOUND_CTRL=1 with old=7 writes 0 in lanes 16..31 and keeps 7 in
+        // lanes 0..15, so lanes disagree and v2 has no uniform Shape::K.
+        let (v2_fi0_bc1_seven, v1_fi0_bc1_seven, _, _) = run(0xFFFF_0000, 7, 2);
+        assert_eq!(v2_fi0_bc1_seven, None);
+        assert_eq!(v1_fi0_bc1_seven, None);
+
+        // FI=1 (op_sel=1 or 3) fetches inactive lane 15, yielding the full
+        // inclusive prefix sum.
+        for opsel in [1u8, 3] {
+            let (_, v1_fi1, v0_in, saved) = run(0xFFFF_0000, 0, opsel);
+            assert_eq!(
+                v1_fi1,
+                Some(Shape::Prefix(Op::AddU, v0_in, saved, 0, true)),
+                "opsel={opsel} with FI=1 must fetch inactive lane 15"
+            );
+        }
+
+        // When EXEC = 0xFFFF_8000, source lane 15 is active, so even FI=0,
+        // BOUND_CTRL=0 reads v1[15] for lanes 16..31 (and lane 15 reads active
+        // lane 31, so v1 is no prefix sum, while v2[16..31] gets lane 15).
+        let (v2_active_src, _, _, _) = run(0xFFFF_8000, 7, 0);
+        assert_ne!(
+            v2_active_src,
+            Some(Shape::K(7)),
+            "active source lane 15 must be fetched even with FI=0"
+        );
+    }
+
+    /// Wave64 whole-wave sum reduction of `v1` into `s4`, after initializing
+    /// `v1` via `v_cndmask_b32 v1, 0, v0, s[mask_reg : mask_reg + 1]`.
+    fn wave64_sum_section_words(prologue: &[u32], mask_reg: u16, epilogue: &[u32]) -> Vec<u32> {
+        let mut w = prologue.to_vec();
+        w.extend(vop3(1, 0x101, 128, 256, mask_reg)); // v_cndmask_b32 v1, 0, v0, s[mask:mask+1]
+        for ctrl in [0x00B1u16, 0x004E, 0x0164, 0x0168] {
+            w.push(vop2(1, 0x25, 0xFA, 1));
+            w.push(dpp16(1, ctrl, 0xF, 0xF, false));
+        }
+        w.extend(vop3(2, 0x378, 257, 128, 128)); // v_permlanex16_b32 v2, v1, 0, 0
+        w.push(vop2(1, 0x25, 258, 1)); // v_add_nc_u32 v1, v2, v1
+        w.extend(vop3(4, 0x360, 257, 128 + 31, 0)); // v_readlane_b32 s4, v1, 31
+        w.extend(vop3(5, 0x360, 257, 128 + 63, 0)); // v_readlane_b32 s5, v1, 63
+        w.push(vop1(2, 0x01, 4)); // v_mov_b32 v2, s4
+        w.push(vop2(2, 0x25, 5, 2)); // v_add_nc_u32 v2, s5, v2
+        w.extend(vop3(4, 0x360, 258, 128, 0)); // v_readlane_b32 s4, v2, 0
+        w.extend_from_slice(epilogue);
+        w
+    }
+
+    #[test]
+    fn wave64_whole_wave_section_tracks_full_64bit_masks_and_width() {
+        // 1. Positive control: intact 64-bit saved + s_and_b64 mask reduces to Active.
+        let valid = wave64_sum_section_words(
+            &[
+                sop1(0, 0x25, 193),    // s_or_saveexec_b64 s[0:1], -1
+                sop2(2, 0x0F, 0, 193), // s_and_b64 s[2:3], s[0:1], -1
+            ],
+            2,
+            &[sop1(EXEC, 0x04, 0)], // s_mov_b64 exec, s[0:1]
+        );
+        let p = build(&valid, true);
+        let insts = &p.blocks[0].insts;
+        let s2_val = insts[1].write(Reg::S(2)).unwrap();
+        let v0_in = insts[2].read(Reg::V(0)).unwrap();
+        let s4_val = insts[insts.len() - 3].write(Reg::S(4)).unwrap();
+        let sec = &sections(&p, 0)[&0];
+        assert_eq!(
+            sec.shapes.get(&s4_val),
+            Some(&Shape::Active(Op::AddU, v0_in, s2_val, 0))
+        );
+
+        // 2. Clobbering the high half s3 of s[2:3] before v_cndmask_b32 alters
+        // lanes 32..63; wave simulation must not treat s[2:3] as the intact mask.
+        let clobbered_hi = wave64_sum_section_words(
+            &[
+                sop1(0, 0x25, 193),    // s_or_saveexec_b64 s[0:1], -1
+                sop2(2, 0x0F, 0, 193), // s_and_b64 s[2:3], s[0:1], -1
+                sop1(3, 0x03, 128),    // s_mov_b32 s3, 0
+            ],
+            2,
+            &[sop1(EXEC, 0x04, 0)],
+        );
+        let p = build(&clobbered_hi, true);
+        let insts = &p.blocks[0].insts;
+        let s4_val = insts[insts.len() - 3].write(Reg::S(4)).unwrap();
+        let sec = &sections(&p, 0)[&0];
+        assert_eq!(sec.shapes.get(&s4_val), None);
+
+        // 3. A 32-bit s_and_b32 in wave64 writes only s2 and leaves s3 unrelated.
+        let narrow_and = wave64_sum_section_words(
+            &[
+                sop1(0, 0x25, 193),    // s_or_saveexec_b64 s[0:1], -1
+                sop2(2, 0x0E, 0, 193), // s_and_b32 s2, s0, -1
+            ],
+            2,
+            &[sop1(EXEC, 0x04, 0)],
+        );
+        let p = build(&narrow_and, true);
+        let insts = &p.blocks[0].insts;
+        let s4_val = insts[insts.len() - 3].write(Reg::S(4)).unwrap();
+        let sec = &sections(&p, 0)[&0];
+        assert_eq!(sec.shapes.get(&s4_val), None);
+
+        // 4. Wrong-width saveexec: s_or_saveexec_b32 in wave64 leaves EXEC_HI
+        // untouched and must not open a whole-wave section (and vice versa).
+        let w32_in_64 = [sop1(0, 0x3D, 193), sop1(EXEC, 0x03, 0)];
+        assert!(sections(&build(&w32_in_64, true), 0).is_empty());
+        let w64_in_32 = [sop1(0, 0x25, 193), sop1(EXEC, 0x04, 0)];
+        assert!(sections(&build(&w64_in_32, false), 0).is_empty());
+
+        // 5. Partial EXEC_LO restore (s_mov_b32 exec_lo, s0) in wave64 must not
+        // close the section before s_mov_b64 exec, s[0:1].
+        let partial_restore = [
+            sop1(0, 0x25, 193),  // 0: s_or_saveexec_b64 s[0:1], -1
+            sop1(EXEC, 0x03, 0), // 1: s_mov_b32 exec_lo, s0 (partial!)
+            sop1(EXEC, 0x04, 0), // 2: s_mov_b64 exec, s[0:1] (full restore)
+        ];
+        let p = build(&partial_restore, true);
+        assert_eq!(sections(&p, 0)[&0].end, 2);
+
+        // 6. Clobbering saved high half s1 before s_mov_b64 exec, s[0:1] is not
+        // a restore of the saved EXEC mask.
+        let clobbered_saved_hi = [
+            sop1(0, 0x25, 193),  // s_or_saveexec_b64 s[0:1], -1
+            sop1(1, 0x03, 128),  // s_mov_b32 s1, 0
+            sop1(EXEC, 0x04, 0), // s_mov_b64 exec, s[0:1]
+        ];
+        assert!(sections(&build(&clobbered_saved_hi, true), 0).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn narrowed_exec_fi_prefix_executes_on_nvidia_wave32() {
+        use super::super::{host, validator};
+        use crate::native::{
+            ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo,
+            UsedResource,
+        };
+        let _one = super::super::valu_tests::ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let host = host::Host::new(false).expect("hardware SM6.6 device required");
+        let mut validator =
+            validator::Validator::load(validator::Validator::default_path().as_deref())
+                .expect("DXIL validation required");
+        for opsel in [1, 3] {
+            let mut words = vec![
+                sop1(8, 0x03, 0),
+                sop1(9, 0x03, 128),
+                0x3D << 26 | 0x02 << 18 | 12 << 6 | (8 >> 1),
+                125 << 25,
+                vop2(5, 0x1A, 130, 0), // output address = lane * 4
+                vop2(0, 0x25, 129, 0), // value = lane + 1
+            ];
+            words.extend(wave32_permlanex16_prefix_words(0xFFFF_0000, 0, opsel));
+            words.extend([
+                (0x38 << 26) | (0x1C << 18) | (1 << 12),
+                (0x80 << 24) | (3 << 16) | (1 << 8) | 5,
+                S_ENDPGM,
+            ]);
+            let native = NativeProgram {
+                stage: HwStage::Cs,
+                wave64: false,
+                vgprs: 8,
+                layout: vec![RootParam {
+                    root: RootType::Table,
+                    table_offset_dwords: 0,
+                    sgprs: 1,
+                    base_register: 0,
+                    user_data: 0,
+                    slot: 0,
+                }],
+                used: vec![UsedResource {
+                    kind: ResourceType::Uav,
+                    root: RootType::Table,
+                    table_offset_dwords: 0,
+                    lower_bound: 0,
+                    stride: 0,
+                    dwords: 4,
+                    user_data: 0,
+                    slot: 0,
+                }],
+                io: StageIo::Cs(ComputeIo {
+                    rsrc2: 1 << 1,
+                    threads: [32, 1, 1],
+                }),
+                code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            };
+            let p = crate::ir::build(&native.code, false, native.vgprs).unwrap();
+            let st = crate::structure::structure(&p).unwrap();
+            let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let io = crate::io::raise(&p, &native).unwrap();
+            let bytes = crate::dxbc::build(&[]);
+            let c = crate::dxbc::Container::parse(&bytes).unwrap();
+            let mut shader = super::super::emit(&c, &native, &p, &st, &io, &res).unwrap();
+            validator.validate(&mut shader.dxil).unwrap();
+            let (root, pso) = host.compute_pipeline(&shader).unwrap();
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &host::Dispatch {
+                        roots: vec![(
+                            0,
+                            host::Root::Constants(vec![
+                                0;
+                                shader.user_data_dwords().max(1) as usize
+                            ]),
+                        )],
+                        views: &[host::View::RawUav(32)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap();
+            let expected: Vec<_> = (1..=32u32).map(|lane| lane * (lane + 1) / 2).collect();
+            assert_eq!(&out[0][..32], expected, "FI=1 BOUND_CTRL={}", opsel >> 1);
+        }
+    }
+
+    // Helpers below also exercise the original reduction patterns.
     const fn sop1(sdst: u8, op: u8, ssrc0: u8) -> u32 {
         0xBE80_0000 | (sdst as u32) << 16 | (op as u32) << 8 | ssrc0 as u32
     }
