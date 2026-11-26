@@ -176,7 +176,7 @@ def main():
                  'STARPORT_EVICT_MIN_BYTES', 'STARPORT_EVICT_MIN_RESIDENCY_MS',
                  'STARPORT_SKIP_MIPS_TARGET_DIM', 'STARPORT_SELFWRITE_FILTER',
                  'STARPORT_PARALLEL_WORK', 'STARPORT_WORKER_THREADS', 'STARPORT_XXH3', 'STARPORT_RETAINED_MIP_READS',
-                 'STARPORT_TRIM_CACHES', 'STARPORT_EXPOSURE_WARNING'):
+                 'STARPORT_TRIM_CACHES', 'STARPORT_EXPOSURE_WARNING', 'VICTORY_WIDE_BACK'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':

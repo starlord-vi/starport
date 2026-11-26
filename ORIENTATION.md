@@ -46,3 +46,23 @@ regressions and RT completeness guards are required invariants.
 
 Paths without a prefix in this table are under `crates/victory-gpu/src`.
 The first table is the recorded pre-change map, not a claim about current defaults.
+
+## Second optimization pass
+
+| Area | Current code / boundary |
+| --- | --- |
+| Subphases and fixed-scene benchmark | `perf.rs`: bounded per-present phase medians/p95, DXGI/system/process snapshots, F8 30-second JSON; HLE lifecycle and owned host window consume F8 only in bench mode |
+| Native allocation accounting | `allocstat.rs`: COM-owned final-release counters; textures/RT/buffer/upload/readback categories, descriptor stride estimate, PSO object count and dimension/BC histogram |
+| Real tail residency | `progressive.rs`, `resource.rs`, `texture.rs`, `residency.rs`: sparse real BC tail admission, separate native allocation budget, newest/smaller-first idle promotion with private initialization fence |
+| Descriptor transactions | `descriptor/host.rs`: `PromotionPatch`, generation-checked restoration after failed promotion/reclaim; effective mip metadata follows actual backing |
+| Eviction eligibility | `residency.rs`: total DXGI pressure, V2 uncompressed/small/recent/churn exclusions, separate hard mapping invalidation journal, per-release logs |
+| Dimension target | `resource.rs`: target mip0 dimension with retained 3-mip minimum; explicit fixed-N compatibility and shared SRV/size metadata |
+| Self-write filter | `selfwrite.rs`, `shadow.rs`: initialized dirty-page snapshot comparison against merged host bytes; requested reset safely falls back to comparison because guest writers remain concurrent |
+| Native protection fixtures | `readback_probe.rs` (tests only), `docs/pass2-readback-boundary.md`: actual Windows fault/write-watch/alias tests; production lazy/adaptive readback still absent |
+| Bounded CPU work | `work.rs`, `shadow.rs`, `texture.rs`: dedicated Rayon pool, xxh3-128/BLAKE3 change checks, retained-mip source reads for progressive BC images; no new buffer async or upload copy queue |
+| Disposable cache budgets | `memtrim.rs`, `shadow.rs`, `host.rs`: reported memory preset also limits idle snapshots/upload chunks, never decommits live guest bytes or in-flight resources |
+| User comparisons | `VERIFY2.md`: ordered F8 comparisons, defaults/kill switches, actual scope and skipped lazy/async stages |
+
+The NVIDIA Wave32/Wave64 guards and ambient shader behavior are unchanged.
+The self-write filter preserves the existing write-watch query/reset ordering;
+the new retained-mip reader keeps the nonblocking remap read lock.

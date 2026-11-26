@@ -204,27 +204,7 @@ fn write_bench(bench: Bench, memory: Memory, now: u64) {
         .unwrap_or_else(|| {
             std::env::temp_dir().join(format!("starport-bench-{}.json", std::process::id()))
         });
-    let result = (|| -> anyhow::Result<()> {
-        victory_core::policy::ensure_outside_repo(&path)?;
-        let tmp = path.with_extension("json.tmp");
-        victory_core::policy::ensure_outside_repo(&tmp)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let output = format!(
-            "{{\"schema\":1,\"requested_window_us\":30000000,\"trigger_us\":{},\"completed_us\":{now},\"complete_frame_samples\":{},\"discarded_capacity_samples\":{},\"recorded_draws\":{},\"cpu_worker_totals_overlap\":true,\"phases\":{},\"memory_start\":{},\"memory_end\":{}}}\n",
-            bench.start,
-            bench.samples.rows.len(),
-            bench.samples.dropped,
-            bench.draws,
-            bench.samples.json(),
-            bench.memory.json(),
-            memory.json()
-        );
-        std::fs::write(&tmp, output)?;
-        std::fs::rename(tmp, &path)?;
-        Ok(())
-    })();
+    let result = write_bench_to(&path, &bench, memory, now);
     match result {
         Ok(()) => {
             tracing::info!(target:"starport::bench",path=%path.display(),samples=bench.samples.rows.len(),dropped=bench.samples.dropped,"30-second fixed-scene benchmark saved; scene selection remains the user's responsibility")
@@ -233,6 +213,33 @@ fn write_bench(bench: Bench, memory: Memory, now: u64) {
             tracing::error!(target:"starport::bench",%error,path=%path.display(),"benchmark summary write failed")
         }
     }
+}
+
+fn write_bench_to(
+    path: &std::path::Path,
+    bench: &Bench,
+    memory: Memory,
+    now: u64,
+) -> anyhow::Result<()> {
+    victory_core::policy::ensure_outside_repo(path)?;
+    let tmp = path.with_extension("json.tmp");
+    victory_core::policy::ensure_outside_repo(&tmp)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let output = format!(
+        "{{\"schema\":1,\"requested_window_us\":30000000,\"trigger_us\":{},\"completed_us\":{now},\"complete_frame_samples\":{},\"discarded_capacity_samples\":{},\"recorded_draws\":{},\"cpu_worker_totals_overlap\":true,\"phases\":{},\"memory_start\":{},\"memory_end\":{}}}\n",
+        bench.start,
+        bench.samples.rows.len(),
+        bench.samples.dropped,
+        bench.draws,
+        bench.samples.json(),
+        bench.memory.json(),
+        memory.json()
+    );
+    std::fs::write(&tmp, output)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 pub(crate) fn present() {
@@ -324,6 +331,33 @@ fn complete_interval(previous: u64, now: u64, start: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn benchmark_export_replaces_atomically_and_rejects_source_tree_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bench.json");
+        let mut bench = Bench {
+            start: 1000,
+            samples: Samples::default(),
+            memory: Memory::default(),
+            draws: 123,
+        };
+        bench.samples.push([25; 11]);
+        write_bench_to(&path, &bench, Memory::default(), 30_001_000).unwrap();
+        bench.samples.push([75; 11]);
+        write_bench_to(&path, &bench, Memory::default(), 30_001_001).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains("\"complete_frame_samples\":2"));
+        assert!(json.contains("\"median_us\":50,\"p95_us\":75"));
+        assert!(!path.with_extension("json.tmp").exists());
+        let forbidden =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bench-policy-test.json");
+        assert!(write_bench_to(&forbidden, &bench, Memory::default(), 30_001_001).is_err());
+        assert!(!forbidden.exists());
+        if let Some(out) = std::env::var_os("STARPORT_BENCH_FIXTURE_OUT") {
+            let out = std::path::PathBuf::from(out);
+            write_bench_to(&out, &bench, Memory::default(), 30_001_001).unwrap();
+        }
+    }
     #[test]
     fn benchmark_excludes_partial_trigger_and_end_intervals() {
         assert!(!complete_interval(999, 2000, 1000));

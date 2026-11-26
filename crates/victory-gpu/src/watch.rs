@@ -41,7 +41,7 @@ pub(crate) fn dirty_tracking() -> bool {
 struct Journal {
     /// Numbers the askings; 0 is "never".
     asked: u64,
-    /// Page number â†’ the asking that last found it written.
+    /// Page number -> the asking that last found it written.
     written: BTreeMap<usize, u64>,
     /// Room for the kernel's answer.
     found: Vec<usize>,

@@ -60,6 +60,11 @@ game and records lightweight diagnostics. Explicit options override the profile:
 2 at a display ceiling <=1080p, otherwise 0; at least 3 mips remain).
 `STARPORT_SKIP_TOP_MIP=0|1` remains an explicit alias for N=0|1.
 See [the ordered verification guide](VERIFY.md) for kill switches and comparisons.
+The [second-pass guide](VERIFY2.md) covers real mip tails, the V2 evictor,
+dimension targets, self-write filtering, bounded CPU workers and memory-cache
+caps. It also describes F8 30-second scene captures and the remaining lazy
+readback/async limitations. Set STARPORT_SKIP_MIPS_TARGET_DIM=1024 explicitly
+to select the dimension rule; 0 restores the fixed-N policy above.
 The title chooses resolution and texture pools from the console
 profile; the spoof does not force a particular resolution. Override `--game`,
 `--assets`, `--backend` and `--state` for another layout. Direct Python use

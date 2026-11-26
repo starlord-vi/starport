@@ -89,6 +89,9 @@ draw recording count over those intervals, memory snapshots at capture start
 and completion, and explicit overlap/unknown-byte metadata. F8 does not infer
 that different scenes have equal work. Compare recorded draws as well as frame
 times, and keep the same flags/cache for a controlled pair.
+An offline synthetic export test also checks replacement of an existing report,
+temporary-file completion and rejection of a source-tree output path. That
+fixture validates file handling/JSON structure; it is not a real F8 scene capture.
 
 ## Task 1: real mip tails, then promotion
 
