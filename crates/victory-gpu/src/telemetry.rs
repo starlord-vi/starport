@@ -138,6 +138,8 @@ struct Frame {
     overflow_bytes: u64,
     refused: BTreeMap<(String, bool), u64>,
     ambient_hits: u64,
+    selfwrite_checked: u64,
+    selfwrite_equal: u64,
 }
 
 impl Frame {
@@ -199,6 +201,14 @@ pub(crate) fn ambient(hit: bool) {
     }
 }
 
+pub(crate) fn selfwrite(checked: u64, equal: u64) {
+    if enabled() {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.frame.selfwrite_checked += checked;
+        state.frame.selfwrite_equal += equal;
+    }
+}
+
 pub(crate) fn present(flights: usize, pending_frames: usize) {
     crate::ambient_trace::present();
     crate::perf::present();
@@ -223,6 +233,8 @@ pub(crate) fn present(flights: usize, pending_frames: usize) {
         dirty_reupload_bytes=frame.reasons[1], mip_rebase_bytes=frame.reasons[2], demotion_reupload_bytes=frame.reasons[3],
         promotion_upload_bytes=frame.reasons[4],
         overflow_attribution_bytes=frame.overflow_bytes, ambient_hits=frame.ambient_hits,
+        selfwrite_checked_bytes=frame.selfwrite_checked,selfwrite_equal_bytes=frame.selfwrite_equal,
+        selfwrite_forwarded_bytes=frame.selfwrite_checked.saturating_sub(frame.selfwrite_equal),
         live_texture_bytes=crate::resource::HOST_TEXTURES[1].load(Relaxed),
         waiting_texture_slots=crate::draw::HEAP_TEXTURES_WAITING.load(Relaxed),
         waiting_due_slots=crate::draw::HEAP_TEXTURES_QUEUE[1].load(Relaxed),

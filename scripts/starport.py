@@ -174,7 +174,7 @@ def main():
                  'STARPORT_MEMORY_EVERY_N', 'STARPORT_BENCH',
                  'STARPORT_PROGRESSIVE_TEXTURES', 'STARPORT_TAIL_BUDGET_MB', 'STARPORT_EVICTOR_V2',
                  'STARPORT_EVICT_MIN_BYTES', 'STARPORT_EVICT_MIN_RESIDENCY_MS',
-                 'STARPORT_SKIP_MIPS_TARGET_DIM'):
+                 'STARPORT_SKIP_MIPS_TARGET_DIM', 'STARPORT_SELFWRITE_FILTER'):
         if name in os.environ:
             settings[name] = os.environ[name]
     if args.preset != 'baseline':

@@ -21,6 +21,7 @@ mod ambient;
 mod ambient_trace;
 mod perf;
 mod progressive;
+mod selfwrite;
 pub use perf::hotkey as bench_hotkey;
 #[cfg(windows)]
 mod binding_trace;

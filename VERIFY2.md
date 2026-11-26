@@ -20,6 +20,7 @@ $env:STARPORT_EVICTOR_V2 = '0' # pass-1 descriptor-patched eligibility
 $env:STARPORT_FALLBACK_COLOR = 'black'
 $env:STARPORT_LEGACY_RESIDENCY = '0'
 $env:STARPORT_DIRTY_TRACKING = '1'
+$env:STARPORT_SELFWRITE_FILTER = 'off' # preserve pass-1 refresh behavior
 $env:STARPORT_FRAMES_IN_FLIGHT = '1'
 $env:STARPORT_MEM_BUDGET_MB = '0'
 $env:STARPORT_TELEMETRY = '1'
@@ -205,5 +206,40 @@ reads the same effective allocation generation, including progressive tails.
 No translator behavior changed; unsupported descriptor operations still fail
 with their shader diagnostic. Hard-coded title texel coordinates still need
 visual comparison. Check target logs, live-byte histogram and the same F8 scene.
+
+## Task 4a: stop self-merge re-upload notices
+
+For a separate comparison after the preceding texture changes:
+
+```powershell
+$env:STARPORT_SELFWRITE_FILTER = 'reset'
+.\Play-Starport.cmd --console series-x --preset balanced --ambient 0.6
+```
+
+`reset|compare|off` is accepted, default `reset`. **Reset requests currently
+use the compare safety net**, explicitly logged by `starport::selfwrite`:
+native guest threads remain concurrent, so no safe post-merge ResetWriteWatch
+epoch exists. `compare` selects that path directly; `off` restores pass-1
+refreshes. No reset is issued after the source snapshot, so a guest write in
+the snapshot-to-comparison window retains its dirty notice for the next query.
+
+Filtering applies only to already initialized dirty ranges of buffers that
+have actually participated in a host merge. Initial/unwatched ranges keep
+the conservative old copy path. Adjacent dirty pages are kernel-read in
+bounded 256 KiB batches, then compared in individual 4 KiB pieces against the
+host's current merged bytes. Equal pages leave upload/dirty-snapshot state
+unchanged; differing page runs are copied and marked for upload. One small
+thread-local scratch buffer is reused, without retaining another full buffer
+or a copy per eviction. DIRTY_TRACKING must be 1 for the journaled path.
+
+Check per-frame `selfwrite_checked_bytes`, `selfwrite_equal_bytes`,
+`selfwrite_forwarded_bytes`, dirty-reupload attribution and the new
+`selfwrite_compare` timing. Source snapshot reads are still CPU traffic even
+when a GPU upload is skipped. Actual guest edits still upload; near-zero
+dirty bytes are not promised for buffers the game genuinely updates. This
+filter does not itself remove merge scans or establish a 70% copy-back saving.
+Windows regressions exercise a real self-merge followed by no refresh, a
+subsequent guest edit that does refresh, and a write after snapshot capture
+that remains dirty. GPU changes in the merge test are mocked explicitly.
 
 The remaining task comparisons will be added with their implementations.

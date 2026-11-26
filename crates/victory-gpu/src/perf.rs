@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
-const NAMES: [&str; 10] = [
+const NAMES: [&str; 11] = [
     "frame",
     "preparing",
     "fence_wait",
@@ -16,10 +16,11 @@ const NAMES: [&str; 10] = [
     "upload_recording",
     "staging_alloc",
     "merge_scan",
+    "selfwrite_compare",
 ];
 const CAP: usize = 8192;
 static CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
-static TOTALS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+static TOTALS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
 static TRIGGER: AtomicU64 = AtomicU64::new(0);
 static HELD: AtomicBool = AtomicBool::new(false);
 
@@ -43,6 +44,7 @@ pub(crate) enum Part {
     UploadRecording,
     StagingAlloc,
     MergeScan,
+    SelfWriteCompare,
 }
 pub(crate) struct Timer(usize, Option<Instant>);
 impl Drop for Timer {
@@ -128,11 +130,11 @@ impl Memory {
 
 #[derive(Default)]
 struct Samples {
-    rows: VecDeque<[u64; 10]>,
+    rows: VecDeque<[u64; 11]>,
     dropped: u64,
 }
 impl Samples {
-    fn push(&mut self, row: [u64; 10]) {
+    fn push(&mut self, row: [u64; 11]) {
         if self.rows.len() == CAP {
             self.rows.pop_front();
             self.dropped += 1;
@@ -238,7 +240,7 @@ pub(crate) fn present() {
         return;
     }
     let now = CLOCK.elapsed().as_micros() as u64;
-    let mut row = [0; 10];
+    let mut row = [0; 11];
     for (i, total) in TOTALS.iter().enumerate() {
         row[i + 1] = total.swap(0, Relaxed);
     }
@@ -336,11 +338,11 @@ mod tests {
         let mut samples = Samples::default();
         assert_eq!(samples.stats(0), (0, 0));
         for n in 1..=100 {
-            samples.push([n; 10]);
+            samples.push([n; 11]);
         }
         assert_eq!(samples.stats(0), (50, 95));
         for _ in 0..CAP {
-            samples.push([200; 10]);
+            samples.push([200; 11]);
         }
         assert_eq!(samples.rows.len(), CAP);
         assert_eq!(samples.dropped, 100);

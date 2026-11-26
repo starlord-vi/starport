@@ -16,7 +16,7 @@
 //! indexed heaps keep what their first use copied.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -27,6 +27,86 @@ use crate::watch::PAGE;
 #[cfg(test)]
 mod fine_upload_tests {
     use super::*;
+    #[test]
+    fn self_merge_is_filtered_but_a_later_guest_write_is_uploaded() {
+        use windows_sys::Win32::System::Memory::*;
+        const SIZE: usize = 64 << 10;
+        struct Memory(*mut std::ffi::c_void);
+        impl Drop for Memory {
+            fn drop(&mut self) {
+                unsafe { VirtualFree(self.0, 0, MEM_RELEASE) };
+            }
+        }
+        let memory = Memory(unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                SIZE,
+                MEM_RESERVE | MEM_COMMIT | 0x20_0000,
+                PAGE_READWRITE,
+            )
+        });
+        assert!(!memory.0.is_null());
+        unsafe { memory.0.cast::<u8>().write_bytes(0, SIZE) };
+        let h = host().unwrap();
+        let (buffer, data) = h.shared_buffer(SIZE as u64).unwrap();
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let source = memory.0 as usize;
+        let copy = Shadow::new(buffer, data, gpu, source as u64, SIZE as u64);
+        assert_eq!(copy.update(source, SIZE), SIZE);
+        copy.writing(source, SIZE);
+        // Mock the GPU's changed bytes; exercise the actual Windows guest merge,
+        // write-watch query and refresh path rather than weakening those checks.
+        unsafe { data.add(PAGE + 12).write(77) };
+        assert_ne!(copy.copy_back(source, SIZE), 0);
+        copy.copy_back_done(&[(source, source + SIZE)]);
+        assert_eq!(unsafe { *memory.0.cast::<u8>().add(PAGE + 12) }, 77);
+        assert!(copy.self_merged.load(Ordering::Relaxed));
+        assert_eq!(
+            copy.update(source, SIZE),
+            0,
+            "self-written dirty pages are already current"
+        );
+        unsafe { memory.0.cast::<u8>().add(PAGE + 12).write(88) };
+        assert_eq!(
+            copy.update(source, SIZE),
+            PAGE,
+            "a real guest edit after the merge survives"
+        );
+        assert_eq!(unsafe { *data.add(PAGE + 12) }, 88);
+        assert_eq!(copy.update(source, SIZE), 0);
+    }
+
+    #[test]
+    fn a_guest_write_after_the_filter_snapshot_remains_dirty() {
+        use windows_sys::Win32::System::Memory::*;
+        let source = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                64 << 10,
+                MEM_RESERVE | MEM_COMMIT | 0x20_0000,
+                PAGE_READWRITE,
+            )
+        };
+        assert!(!source.is_null());
+        unsafe { source.cast::<u8>().write_bytes(0, 64 << 10) };
+        let h = host().unwrap();
+        let (buffer, data) = h.shared_buffer((64 << 10) as u64).unwrap();
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let copy = Shadow::new(buffer, data, gpu, source as u64, (64 << 10) as u64);
+        assert_eq!(copy.update(source as usize, 64 << 10), 64 << 10);
+        copy.self_merged.store(true, Ordering::Relaxed);
+        crate::selfwrite::snapshot(source as usize, PAGE, |snapshot| {
+            assert_eq!(snapshot[8], 0);
+            // A write in the snapshot-to-comparison window must not be erased
+            // by a ResetWriteWatch issued after this callback.
+            unsafe { source.cast::<u8>().add(8).write(99) };
+            assert_eq!(snapshot[8], 0);
+        });
+        assert_eq!(copy.update(source as usize, 64 << 10), PAGE);
+        assert_eq!(unsafe { *data.add(8) }, 99);
+        drop(copy);
+        unsafe { assert_ne!(VirtualFree(source, 0, MEM_RELEASE), 0) };
+    }
     #[test]
     fn one_dirty_kernel_page_does_not_refresh_its_64k_neighbors() {
         use windows_sys::Win32::System::Memory::*;
@@ -83,6 +163,7 @@ pub(crate) struct Shadow {
     copied: Mutex<Vec<u64>>,
     /// Whether the memory is write-watched: unknown, yes, no.
     watched: AtomicU8,
+    self_merged: AtomicBool,
     /// Ranges shaders of a submission not yet copied back may be writing:
     /// title memory there is older than the copy.
     pending: Mutex<Vec<(usize, usize)>>,
@@ -1956,6 +2037,7 @@ impl Shadow {
             len,
             copied: Mutex::new(vec![0; pages as usize]),
             watched: AtomicU8::new(0),
+            self_merged: AtomicBool::new(false),
             pending: Mutex::default(),
             flights: Mutex::default(),
             before: Mutex::default(),
@@ -2229,6 +2311,7 @@ impl Shadow {
                 if differs != 0 {
                     crate::watch::writing(start + at, n);
                     crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+                    self.self_merged.store(true, Ordering::Relaxed);
                     written += n;
                 }
             }
@@ -2328,6 +2411,7 @@ impl Shadow {
         }
         crate::watch::writing(start + at, n);
         crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+        self.self_merged.store(true, Ordering::Relaxed);
         n
     }
 
@@ -2731,10 +2815,13 @@ impl Shadow {
     /// (`written`: last writes by page, in page order; `now`: this
     /// asking), whole pages within the buffer.
     fn copy_stale(&self, from: usize, to: usize, now: u64, written: &[(usize, u64)]) -> usize {
+        if from >= to {
+            return 0;
+        }
         let base = self.start as usize / PAGE;
         let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
         let mut writes = written.iter().peekable();
-        let (mut bytes, mut run) = (0, None);
+        let (mut bytes, mut run): (usize, Option<(usize, bool)>) = (0, None);
         let last = (to - 1) / PAGE;
         for page in from / PAGE..=last {
             let write = match writes.peek() {
@@ -2746,40 +2833,114 @@ impl Shadow {
             };
             let at = &mut copied[page - base];
             if *at == 0 || write > *at {
-                // A page only partly in the range is copied in part: it
-                // stays stale for the rest.
+                let initialized = *at != 0;
+                if let Some((first, old)) = run
+                    && old != initialized
+                {
+                    bytes +=
+                        self.copy_initialized((first * PAGE).max(from), (page * PAGE).min(to), old);
+                    run = None;
+                }
                 let (start, end) = (self.start as usize, (self.start + self.len) as usize);
                 if (page * PAGE).max(start) >= from && ((page + 1) * PAGE).min(end) <= to {
                     *at = now;
                 }
-                run.get_or_insert(page);
-            } else if let Some(first) = run.take() {
-                bytes += self.copy((first * PAGE).max(from), (page * PAGE).min(to));
+                run.get_or_insert((page, initialized));
+            } else if let Some((first, initialized)) = run.take() {
+                bytes += self.copy_initialized(
+                    (first * PAGE).max(from),
+                    (page * PAGE).min(to),
+                    initialized,
+                );
             }
         }
-        // Cut to the range: next to it shaders may be writing the copy.
-        if let Some(first) = run {
-            bytes += self.copy((first * PAGE).max(from), ((last + 1) * PAGE).min(to));
+        if let Some((first, initialized)) = run {
+            bytes += self.copy_initialized(
+                (first * PAGE).max(from),
+                ((last + 1) * PAGE).min(to),
+                initialized,
+            );
         }
         bytes
     }
 
-    /// Copies title memory `[from, to)`, cut to the buffer, into the copy.
+    fn copy_initialized(&self, from: usize, to: usize, initialized: bool) -> usize {
+        if !initialized || !self.self_merged.load(Ordering::Relaxed) || !crate::selfwrite::enabled()
+        {
+            return self.copy(from, to);
+        }
+        let _timer = crate::perf::time(crate::perf::Part::SelfWriteCompare);
+        let mut copied = 0;
+        let start = self.start as usize;
+        let mut cursor = from;
+        while cursor < to {
+            let end = (cursor.saturating_add(crate::selfwrite::BATCH)).min(to);
+            copied += crate::selfwrite::snapshot(cursor, end - cursor, |snapshot| {
+                let mut at = cursor;
+                let mut changed = None;
+                let mut bytes = 0;
+                while at < end {
+                    let next = ((at / PAGE + 1) * PAGE).min(end);
+                    let old =
+                        unsafe { std::slice::from_raw_parts(self.data.add(at - start), next - at) };
+                    let same = old == &snapshot[at - cursor..next - cursor];
+                    if same {
+                        if let Some(first) = changed.take() {
+                            let n = at - first;
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    snapshot.as_ptr().add(first - cursor),
+                                    self.data.add(first - start),
+                                    n,
+                                )
+                            };
+                            self.note_copy(first, at);
+                            bytes += n;
+                        }
+                    } else {
+                        changed.get_or_insert(at);
+                    }
+                    at = next;
+                }
+                if let Some(first) = changed {
+                    let n = end - first;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            snapshot.as_ptr().add(first - cursor),
+                            self.data.add(first - start),
+                            n,
+                        )
+                    };
+                    self.note_copy(first, end);
+                    bytes += n;
+                }
+                bytes
+            });
+            cursor = end;
+        }
+        crate::telemetry::selfwrite((to - from) as u64, (to - from - copied) as u64);
+        copied
+    }
+
+    /// Initial/unwatched ranges retain the old unconditional upload path.
     fn copy(&self, from: usize, to: usize) -> usize {
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let (from, to) = (from.max(start), to.min(end));
-        // SAFETY: inside the mapping (`from` and `to` are within the buffer).
         let at = unsafe { self.data.add(from - start) };
         crate::host::copy_mapped(at, from as *const u8, to - from, false);
+        self.note_copy(from, to);
+        to - from
+    }
+
+    fn note_copy(&self, from: usize, to: usize) {
+        let start = self.start as usize;
         self.telemetry.upload(
             (from - start) as u64,
             (to - from) as u64,
             crate::telemetry::Reason::FirstUpload,
         );
-        // After the bytes are in: a snapshot taken meanwhile is not current.
         self.changed(from - start, to - start);
         self.card_changed(from - start, to - start);
-        to - from
     }
 
     /// Whether shaders read and write this copy in the card's own memory
@@ -2902,6 +3063,7 @@ impl Shadow {
             if differs != 0 {
                 crate::watch::writing(start + at, n);
                 crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+                self.self_merged.store(true, Ordering::Relaxed);
                 written = n;
             }
         } else {
@@ -2990,6 +3152,7 @@ impl Shadow {
         }
         crate::watch::writing(start + at, n);
         crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
+        self.self_merged.store(true, Ordering::Relaxed);
         n
     }
 }
