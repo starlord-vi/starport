@@ -478,9 +478,9 @@ Both capture modes synchronize GPU work and write images. Their FPS is not a
 performance benchmark. Target dumps add substantial time and disk use; they
 are disabled in ordinary runs.
 
-## Native rendering instead of unsupported FSR kernels
+## Upscaler settings and ACCC kernels
 
-The launcher defaults to `--fsr off`: it changes only the saved
+The launcher defaults to `--fsr preserve`. An explicit `--fsr quality-zero` changes only the saved
 `graphics/fsrQuality` value to `0` in existing title settings under the selected
 `--data` directory. It first stores an exact-byte, content-addressed
 `settings.xml.starport-fsr-<hash>.bak` beside the file, then replaces settings
@@ -489,12 +489,12 @@ Malformed or ambiguous settings abort the launch. A new profile without any
 settings emits a warning because the preset cannot be applied yet.
 
 `--fsr preserve` performs no settings writes; it does not undo a previous
-`--fsr off`. For an A/B, restore the exact backup printed by the first launch
+`--fsr quality-zero` (or its legacy alias `off`). For an A/B, restore the exact backup printed by the first launch
 and pass `--fsr preserve`. The launcher records the mode, previous/new values
 and backup path in `launch.json` and `summary.json` as `title_settings`.
 
-This uses the title's existing native-rendering configuration (also present in
-the locally tested coolfox profile), rather than accepting FSR dispatches and
-silently losing their output. ACCC/ACO upscaler translation remains unsupported;
-the partial parser experiment was rejected after offline validation exposed
-unsupported kernels. See [the capture findings](docs/black-world-20261127.md).
+Quality zero still issues ACCC compute dispatches in captured title frames;
+it is not a reliable way to disable upscaling. The full ACCC/FSPX translation
+path now passes all 29 locally recorded containers through DXIL validation
+and NVIDIA hardware PSO creation. That offline check is not visual acceptance.
+See [the updated capture findings](docs/black-world-20261127.md).

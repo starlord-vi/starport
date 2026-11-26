@@ -819,6 +819,73 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod starport_regressions {
     use super::*;
 
+    /// Exercises every captured ACCC program, including validation and creation
+    /// of a real hardware pipeline. Fixtures and diagnostics remain outside Git.
+    #[test]
+    #[ignore = "requires STARPORT_ACCC_INPUTS and STARPORT_SHADER_AUDIT_OUT"]
+    fn accc_compute_pipelines_validate_offline() {
+        let inputs = PathBuf::from(std::env::var("STARPORT_ACCC_INPUTS").unwrap());
+        let out = PathBuf::from(std::env::var("STARPORT_SHADER_AUDIT_OUT").unwrap());
+        assert!(!out.starts_with(std::env::current_dir().unwrap()));
+        std::fs::create_dir_all(&out).unwrap();
+        emit::set_host_max_wave(32);
+        let mut validator = Validator::load(Validator::default_path().as_deref()).unwrap();
+        let host = Host::new(false).expect("hardware PSO validation required");
+        let mut failures = Vec::new();
+        let mut count = 0;
+        for path in std::fs::read_dir(inputs).unwrap() {
+            let path = path.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("cdxil") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let c = Container::parse(&bytes).unwrap();
+            if c.part(FourCC::ACCC).is_none() {
+                continue;
+            }
+            count += 1;
+            let hash = path.file_stem().unwrap().to_string_lossy();
+            let result = (|| -> anyhow::Result<()> {
+                let mut shader = emit::translate(&bytes)?;
+                validator
+                    .validate(&mut shader.dxil)
+                    .map_err(anyhow::Error::msg)?;
+                std::fs::write(out.join(format!("{hash}.dxil")), &shader.dxil)?;
+                host.compute_pipeline(&shader).map_err(anyhow::Error::msg)?;
+                Ok(())
+            })();
+            eprintln!("{hash}: {result:?}");
+            if let Err(error) = result {
+                failures.push(format!("{hash}: {error}"));
+                for native in victory_shader::container_programs(&c).unwrap() {
+                    let p = victory_shader::spill::build(&native).unwrap();
+                    let st = structure::structure(&p);
+                    let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok());
+                    let mut compact = format!(
+                        "native {native:#?}\ninputs {:?}\nresources {res:#?}\n",
+                        p.inputs
+                    );
+                    for (b, block) in p.blocks.iter().enumerate() {
+                        compact.push_str(&format!("block {b} phis {:?}\n", block.phis));
+                        for (i, inst) in block.insts.iter().enumerate() {
+                            compact.push_str(&format!(
+                                "({b},{i}) @{:#x} {} {:?} r{:?} w{:?}\n",
+                                inst.machine.offset,
+                                inst.name(),
+                                inst.fields,
+                                inst.reads,
+                                inst.writes
+                            ));
+                        }
+                    }
+                    std::fs::write(out.join(format!("{hash}.ssa.txt")), compact).unwrap();
+                }
+            }
+        }
+        assert_eq!(count, 29, "all recorded ACCC programs must be tested");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// Local data stays outside Git. This reads shader containers only;
     /// it never maps a title executable or executes any title code.
     #[test]

@@ -310,6 +310,98 @@ fn packed_add_selects_halves_of_inline_constants() {
 }
 
 #[test]
+fn accc_dot_products_use_signed_bytes_wrapping_accumulation_and_half_selectors() {
+    let inputs = [
+        [0x807FFF01, 0xFF017F80, 0, 0],
+        [0x80808080, 0x80808080, i32::MAX as u32, 0],
+        [0x01020304, 0x05060708, u32::MAX, 0],
+    ];
+    let dot = |a: u32, b: u32, acc: u32| -> u32 {
+        a.to_le_bytes()
+            .into_iter()
+            .zip(b.to_le_bytes())
+            .fold(acc, |sum, (x, y)| {
+                sum.wrapping_add((i32::from(x as i8) * i32::from(y as i8)) as u32)
+            })
+    };
+    let body = [vop1(1, 0, vgpr(3)), vop2(0x0d, 0, vgpr(1), 2)];
+    run_cases(&build_valu_cs(&body), &inputs, |backend, _, x, got| {
+        assert_eq!(got, dot(x[0], x[1], x[2]), "{backend}: dot4c");
+    });
+    for (low, high) in [(0u8, 3u8), (1, 2), (2, 1), (3, 0)] {
+        let body = [
+            0xcc16_0000 | u32::from(low) << 11,
+            u32::from(vgpr(1))
+                | u32::from(vgpr(2)) << 9
+                | u32::from(vgpr(3)) << 18
+                | u32::from(high) << 27,
+        ];
+        let select = |x: u32, k: u8| {
+            let lo = x >> (16 * u32::from(low >> k & 1)) & 0xffff;
+            let hi = x >> (16 * u32::from(high >> k & 1)) & 0xffff;
+            lo | hi << 16
+        };
+        run_cases(&build_valu_cs(&body), &inputs, |backend, _, x, got| {
+            assert_eq!(
+                got,
+                dot(select(x[0], 0), select(x[1], 1), x[2]),
+                "{backend}: dot4 selectors {low}/{high}"
+            );
+        });
+    }
+}
+
+#[test]
+fn accc_packed_fmac_accumulates_each_half_independently() {
+    let body = [vop1(1, 0, vgpr(3)), vop2(0x3c, 0, vgpr(1), 2)];
+    run_cases(
+        &build_valu_cs(&body),
+        &[[0xc0003c00, 0x42004000, 0x45004400, 0]],
+        |backend, _, _, got| {
+            assert_eq!(got, 0xbc004600, "{backend}: (1,-2)*(2,3)+(4,5)");
+        },
+    );
+}
+
+#[test]
+fn scalar_condition_code_is_integer_zero_or_one() {
+    let body = [0xBF060100, vop1(1, 0, 253)]; // s_cmp_eq_u32 s0,s1; v_mov v0,scc
+    run_cases(
+        &build_valu_cs(&body),
+        &[[4, 4, 0, 0], [4, 5, 0, 0]],
+        |backend, _, x, got| {
+            assert_eq!(got, u32::from(x[0] == x[1]), "{backend}: src_scc");
+        },
+    );
+}
+
+#[test]
+fn accc_permlane_selects_both_rows_of_a_host_wave() {
+    for op in [0x377u16, 0x378] {
+        for read in [0u16, 31] {
+            let mut body = Vec::from(vop3(op, 1, vgpr(0), sgpr(0), sgpr(1)));
+            body.extend(vop3(0x360, 12, vgpr(1), 128 + read, 0));
+            body.push(vop1(1, 0, sgpr(12)));
+            let cases = [
+                [0x76543210, 0xfedcba98, 0, 0],
+                [0x89abcdef, 0x01234567, 0, 0],
+            ];
+            run_cases_on(
+                &build_cs(&body, 32, 0),
+                &cases,
+                &[("hardware", false)],
+                |backend, _, x, got| {
+                    let selectors = u64::from(x[0]) | u64::from(x[1]) << 32;
+                    let pick = (selectors >> (4 * (read & 15)) & 15) as u32;
+                    let row = u32::from(read & 16) ^ if op == 0x378 { 16 } else { 0 };
+                    assert_eq!(got, row | pick, "{backend}: permlane {op:x}, lane {read}");
+                },
+            );
+        }
+    }
+}
+
+#[test]
 fn v_med3_f32_matches_rdna2_with_nan() {
     // v_med3_f32 v0, v1, v2, v3 (VOP3 opcode 0x157)
     let shader = build_valu_cs(&vop3(0x157, 0, vgpr(1), vgpr(2), vgpr(3)));

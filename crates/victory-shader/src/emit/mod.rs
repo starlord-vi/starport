@@ -283,10 +283,7 @@ pub struct UserData {
 /// shader container.
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
-    let dxil = c
-        .part(FourCC::DXIL)
-        .ok_or(ShaderError::Malformed("no DXIL part"))?;
-    let native = crate::native_programs(dxil.data)?
+    let native = crate::container_programs(&c)?
         .into_iter()
         .find(|p| {
             matches!(
@@ -392,7 +389,16 @@ pub fn emit(
         // lost the card in a submission of two programs that had just moved to it
         // (`ptfx_CS_lightAtlas_Sprite` and `_Trail`). The 32-lane programs' form below, which
         // has no barrier, stays on.
-        let wide_on = std::env::var_os("VICTORY_WAVE_WIDE").is_some_and(|v| v == "1");
+        let wide_option = std::env::var_os("VICTORY_WAVE_WIDE");
+        // ACCC polling/reduction kernels have one guest wave per group.
+        // Both host halves must take the scalar loop together. widen() only
+        // widens branches with a proved wave-any/all meaning and refuses
+        // groups containing several guest waves, which could deadlock.
+        let accc_wave = c.part(FourCC::ACCC).is_some()
+            && matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64)
+            && matches!(&original, Err(ShaderError::Unsupported { what, .. })
+                if *what == "a lane mask exchanged where not every lane runs");
+        let wide_on = wide_option.as_ref().map_or(accc_wave, |v| v == "1");
         // exact first: each host wave on its own where that is exact (the idiom, every
         // form; no barriers), then the other exact forms; then approximate
         for exact in [true, false] {

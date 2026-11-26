@@ -51,19 +51,33 @@ failed acceptance test. The experiment was removed from runnable source;
 no broad Wave32/Wave64 translator changes were shipped. Generated audit data
 remains outside Git in `runtime/starport/renderer-audit/20261127-accc/`.
 
-## Implemented next test
+## Follow-up evidence and ACCC implementation
 
-The launcher now selects the title's native-rendering configuration by setting
-only `fsrQuality=0`, with an exact backup, atomic replacement, metadata and
-`--fsr preserve` opt-out. It does not copy the reference's lower texture/LOD
-settings. Native rendering can increase GPU workload relative to functioning
-upscaling, so this is not an established FPS gain.
+The follow-up user capture `20261126T214745.939555Z` disproved the
+quality-zero bypass hypothesis. Frame 1221 contains a recognizable 1280x720
+world in HDR target `0x1e24e72e5a0` at operation 105. Its 1920x1080 final
+targets are zero. The operation trace records 20 dropped ACCC dispatches
+between the world passes and final output. Quality zero still uses these
+kernels. The launcher now preserves saved settings by default and calls the
+explicit setting `--fsr quality-zero`; `off` remains a legacy alias.
 
-`--capture-targets` now enables existing intermediate-target dumps on selected
-world frames. PNG filenames identify frame/resource for correlation with the
-operation trace; numerical target logs precede each PNG save. This is available
-if the native path remains black. The renderer source/binary stay at `2aef217`
-to retain the existing build-keyed shader/pipeline cache for this setting test.
+Full ACCC support was selected by the user. The current implementation adapts
+the metadata-driven FSPX parser and focused instruction/resource paths from
+GPL-3 reference revision `808342e93a268ded13e67f4aca016214c6d3230d`, credited
+above, with explicit bounds/root consistency checks and regression tests.
+It adds signed-byte dot products, packed FMAC, SCC operands, exact raw-view
+normalization, lane permutations, integer counter stores and post-section
+lane reduction reads. ACCC single-wave kernels can use the existing exact
+wave-wide branch retry; multiple guest waves remain excluded from that retry.
+Existing NVIDIA and lighting handling remains in place.
 
-The user must confirm visible world output and obtain a separate ordinary run
-for performance. Runtime confirmation is pending.
+All 29 captured ACCC containers pass DXIL validation and NVIDIA pipeline
+creation with default settings. The ignored data-dependent acceptance test
+is `accc_compute_pipelines_validate_offline`; set `STARPORT_ACCC_INPUTS` to
+the external audit fixture directory and `STARPORT_SHADER_AUDIT_OUT` to an
+external output directory. Synthetic GPU arithmetic tests also execute on
+hardware and WARP (lane permutation requires hardware Wave32).
+
+Runtime image recovery and performance are still pending; no FPS gain is
+inferred from successful translation. `--capture-targets` is for diagnosis
+and perturbs timing. Ordinary runs are used for performance comparisons.

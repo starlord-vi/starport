@@ -33,7 +33,11 @@ def outside(path, repo):
 
 
 def configure_fsr(data, mode):
-    """Use the title's native rendering path; retain exact-byte XML backups."""
+    """Apply explicit quality-zero A/B settings, retaining exact-byte backups.
+
+    Quality zero still dispatches ACCC upscaling kernels in captured title
+    frames. The legacy 'off' spelling never guaranteed upscaling was disabled.
+    """
     result = dict(mode=mode, files=[])
     if mode == 'preserve':
         return result
@@ -72,10 +76,10 @@ def configure_fsr(data, mode):
             finally:
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)
-            print(f'Native rendering: fsrQuality {previous} -> 0; backup: {backup}', flush=True)
+            print(f'Quality-zero A/B: fsrQuality {previous} -> 0; backup: {backup}', flush=True)
         result['files'].append(record)
     if not result['files']:
-        print('Native rendering: no saved settings.xml yet; FSR preset could not be applied.', flush=True)
+        print('Quality-zero A/B: no saved settings.xml yet; preset could not be applied.', flush=True)
     return result
 
 
@@ -172,8 +176,8 @@ def main():
     parser.add_argument('--capture', action='store_true', help='Diagnostic PNG captures; perturbs timings')
     parser.add_argument('--capture-targets', action='store_true',
                         help='With --capture, dump intermediate render/depth/UAV targets on selected world frames; very slow')
-    parser.add_argument('--fsr', choices=('off', 'preserve'), default='off',
-                        help='Default off: set saved fsrQuality to 0 with a backup; preserve leaves settings untouched')
+    parser.add_argument('--fsr', choices=('quality-zero', 'off', 'preserve'), default='preserve',
+                        help='Preserve saved settings by default. quality-zero sets fsrQuality=0 with a backup; off is a legacy alias, not an upscaler bypass')
     parser.add_argument('--capture-every', type=int, help='Dense native captures every N presents; requires --capture')
     parser.add_argument('--data', type=Path, help='Separate test profile; existing saves are preserved')
     parser.add_argument('--cache', type=Path, help='Shared shader cache for controlled profile comparisons')

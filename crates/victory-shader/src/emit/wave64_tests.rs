@@ -14,6 +14,29 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 const S_ENDPGM: u32 = 0xBF81_0000;
 
+#[test]
+fn accc_reduction_read_from_last_lane_after_exec_restore_includes_both_halves() {
+    let mut body = vec![0x7E0A0281, 0x2C0C0081, 0x340E0B06];
+    let mut tree = super::wave::WAVE_OR_V7_TO_S7[..17].to_vec();
+    tree[15] = 0x00010101; // read lane 0 before combining the two halves
+    body.extend(tree);
+    body.extend([0xBEFE0404, 0xD7600007, 0x00017f01]); // restore; read lane 63
+    body.extend([0x7E000207, 0xE0700000, 0x80020000]); // store the scalar result
+    let native = native(&body);
+    let p = ir::build(&native.code, true, native.vgprs).unwrap();
+    let mut shader = lowered(&native, &p, &HashSet::new()).unwrap();
+    let mut validator = validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("DXIL validator required");
+    validator.validate(&mut shader.dxil).unwrap();
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        on_the_card(&shader, [0, 0]).expect("NVIDIA execution required"),
+        u32::MAX
+    );
+}
+
 /// 64 threads in one console wave. Each thread t holds the bit `1 << (t >> 1)`; the threads
 /// below s0 (a root constant) OR theirs over the wave inside `if (t < s0) { ... }` and store
 /// the result to dword 0 of the raw UAV.

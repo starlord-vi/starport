@@ -149,8 +149,7 @@ impl Shader {
         self.bindings
             .get_or_init(|| {
                 let container = victory_shader::Container::parse(&self.container).ok()?;
-                let part = container.part(victory_shader::FourCC::DXIL)?;
-                let programs = victory_shader::native_programs(part.data).ok()?;
+                let programs = victory_shader::container_programs(&container).ok()?;
                 programs
                     .into_iter()
                     .find(|p| p.stage == victory_shader::HwStage::Cs)
@@ -205,14 +204,11 @@ impl Shader {
 
 #[cfg(windows)]
 fn translate(container: &[u8]) -> Result<Translated, String> {
-    use victory_shader::{Container, FourCC, HwStage};
+    use victory_shader::{Container, HwStage};
     // The translation depends on it (a view index past a capped heap).
     crate::descriptor::host::probe_view_limit();
     let c = Container::parse(container).map_err(|e| e.to_string())?;
-    let programs = match c.part(FourCC::DXIL) {
-        Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
-        None => Vec::new(),
-    };
+    let programs = victory_shader::container_programs(&c).map_err(|e| e.to_string())?;
     let host = crate::shader_cache::host_shader(container)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
     let used = programs

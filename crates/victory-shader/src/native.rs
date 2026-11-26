@@ -71,6 +71,8 @@
 use crate::ShaderError::{self, Malformed};
 use crate::dxbc::{u32_at, u64_at};
 
+mod accc;
+
 const XDAT_OFFSET: usize = 0x18;
 const MAX_XDAT_ENTRIES: usize = 64;
 const KIND_NATIVE: u32 = 0x0d;
@@ -411,6 +413,9 @@ pub struct UsedResource {
 
 /// The native programs in a `DXIL` part's data; empty for the PC layout.
 pub fn native_programs(part: &[u8]) -> Result<Vec<NativeProgram>, ShaderError> {
+    if part.starts_with(b"FSPX") {
+        return Ok(vec![accc::program(part)?]);
+    }
     if part.get(XDAT_OFFSET..XDAT_OFFSET + 4) != Some(b"XDAT") {
         return Ok(Vec::new());
     }
@@ -430,6 +435,15 @@ pub fn native_programs(part: &[u8]) -> Result<Vec<NativeProgram>, ShaderError> {
         out.extend(programs(&unpack(blob)?)?);
     }
     Ok(out)
+}
+
+/// Native code from either supported console compiler container.
+pub fn container_programs(c: &crate::Container) -> Result<Vec<NativeProgram>, ShaderError> {
+    let part = c
+        .part(crate::FourCC::DXIL)
+        .or_else(|| c.part(crate::FourCC::ACCC))
+        .ok_or(Malformed("no DXIL or ACCC part"))?;
+    native_programs(part.data)
 }
 
 fn unpack(blob: &[u8]) -> Result<Vec<u8>, ShaderError> {
