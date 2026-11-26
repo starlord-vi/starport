@@ -819,6 +819,48 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod starport_regressions {
     use super::*;
 
+    #[test]
+    #[ignore = "requires external STARPORT_PIXEL_INPUTS, STARPORT_PIXEL_EXPECTED_COUNT and audit output"]
+    fn captured_world_pixels_validate_offline() {
+        let inputs = PathBuf::from(std::env::var("STARPORT_PIXEL_INPUTS").unwrap());
+        let out = PathBuf::from(std::env::var("STARPORT_SHADER_AUDIT_OUT").unwrap());
+        let expected: usize = std::env::var("STARPORT_PIXEL_EXPECTED_COUNT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            expected > 0 && out.is_absolute() && !out.starts_with(std::env::current_dir().unwrap())
+        );
+        std::fs::create_dir_all(&out).unwrap();
+        emit::set_host_max_wave(32);
+        let mut validator = Validator::load(Validator::default_path().as_deref()).unwrap();
+        let mut failures = Vec::new();
+        let mut count = 0;
+        for entry in std::fs::read_dir(inputs).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "cdxil") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            assert!(name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit()));
+            count += 1;
+            let source = std::fs::read(&path).unwrap();
+            match emit::translate(&source) {
+                Ok(mut shader) => {
+                    assert_eq!(shader.stage, HwStage::Ps);
+                    let result = validator.validate(&mut shader.dxil);
+                    std::fs::write(out.join(format!("{name}.dxil")), &shader.dxil).unwrap();
+                    if let Err(error) = result {
+                        failures.push(format!("{name}: {error}"));
+                    }
+                }
+                Err(error) => failures.push(format!("{name}: {error}")),
+            }
+        }
+        assert_eq!(count, expected, "captured fixture count differs");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// Exercises every captured ACCC program, including validation and creation
     /// of a real hardware pipeline. Fixtures and diagnostics remain outside Git.
     #[test]

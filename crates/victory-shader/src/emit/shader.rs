@@ -654,6 +654,11 @@ impl Shader {
         }
 
         let graphics = self.threads.is_none() || self.mesh.is_some();
+        if self.pixel {
+            reconcile_unused_row_interp(&mut self.inputs);
+        } else if graphics {
+            reconcile_unused_row_interp(&mut self.outputs);
+        }
         if graphics {
             // shortcut: every output is declared to depend on every input; the
             // exact sets need a dependence pass. Drivers read this state.
@@ -896,5 +901,73 @@ impl Shader {
             list.push(Some(self.m.md_node(ops)));
         }
         Some(self.m.md_node(list))
+    }
+}
+
+/// Reconcile only unread packed siblings. Their default linear mode must
+/// match a row's used elements, but conflicting *used* modes must never be
+/// silently flattened. Narrow adaptation of Marvisak/VIctory PR #3408,
+/// 5696ced75b4a6eb494861daac57ff17f9913f6aa (GPL-3.0-or-later).
+fn reconcile_unused_row_interp(elements: &mut [SigElement]) {
+    let mut rows: Vec<_> = elements.iter().filter_map(|e| e.row).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    for row in rows {
+        let mut used = elements
+            .iter()
+            .filter(|e| e.row == Some(row) && e.usage != 0 && e.interp != 0)
+            .map(|e| e.interp);
+        let Some(mode) = used.next() else { continue };
+        if used.any(|m| m != mode) {
+            continue;
+        }
+        for e in elements
+            .iter_mut()
+            .filter(|e| e.row == Some(row) && e.usage == 0 && e.interp != 0)
+        {
+            e.interp = mode;
+        }
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    fn element(interp: u8, usage: u8, row: u32, col: u8) -> SigElement {
+        SigElement {
+            name: "TEXCOORD".into(),
+            index: u32::from(col),
+            kind: 0,
+            comp: 9,
+            interp,
+            row: Some(row),
+            col,
+            cols: 1,
+            usage,
+            half: false,
+        }
+    }
+
+    #[test]
+    fn unread_interpolation_matches_the_used_packed_sibling() {
+        let mut elements = [
+            element(1, 1, 0, 0),
+            element(2, 0, 0, 2),
+            element(3, 1, 1, 0),
+        ];
+        reconcile_unused_row_interp(&mut elements);
+        assert_eq!(elements.map(|e| e.interp), [1, 1, 3]);
+    }
+
+    #[test]
+    fn conflicting_used_interpolations_are_never_silently_changed() {
+        let mut elements = [
+            element(1, 1, 0, 0),
+            element(2, 1, 0, 2),
+            element(3, 0, 0, 3),
+        ];
+        reconcile_unused_row_interp(&mut elements);
+        assert_eq!(elements.map(|e| e.interp), [1, 2, 3]);
     }
 }

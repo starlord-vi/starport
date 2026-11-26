@@ -72,7 +72,9 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
     // Validator 1.6 writes one name per element in element order, repeats
     // included, except that system values share theirs (it keys names by
     // the semantic's string, which is one static string per system value);
-    // the rows sorted by register (unallocated last).
+    // Module signature IDs are in console element order. Sorting the
+    // container rows independently changes their correspondence to DXIL.
+    // Marvisak/VIctory #3408, 5696ced75b4a6eb494861daac57ff17f9913f6aa.
     let mut offsets: Vec<u32> = Vec::new();
     let mut next = 8 + 32 * elements.len() as u32;
     let mut names = Vec::new();
@@ -89,10 +91,8 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
             }
         }
     }
-    let mut order: Vec<usize> = (0..elements.len()).collect();
-    order.sort_by_key(|&i| (elements[i].row.unwrap_or(u32::MAX), elements[i].col));
-    for i in order {
-        let (e, offset) = (&elements[i], offsets[i]);
+    for (i, e) in elements.iter().enumerate() {
+        let offset = offsets[i];
         let used = e.usage << e.col;
         let rw = if input { used } else { !used & 0xf };
         for v in [
@@ -399,6 +399,31 @@ fn md5_block(state: &mut [u32; 4], block: &[u8; 64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_keeps_interleaved_console_element_ids() {
+        let element = |name: &str, col| SigElement {
+            name: name.into(),
+            index: 0,
+            kind: 0,
+            comp: 9,
+            interp: 1,
+            row: Some(2),
+            col,
+            cols: 1,
+            usage: 1,
+            half: false,
+        };
+        let part = signature(&[element("TEXCOORD", 3), element("COLOR", 0)], true);
+        let name_at = |i: usize| {
+            let at = 8 + 32 * i;
+            let offset = u32::from_le_bytes(part[at + 4..at + 8].try_into().unwrap()) as usize;
+            let end = part[offset..].iter().position(|&b| b == 0).unwrap();
+            std::str::from_utf8(&part[offset..offset + end]).unwrap()
+        };
+        assert_eq!(name_at(0), "TEXCOORD");
+        assert_eq!(name_at(1), "COLOR");
+    }
 
     #[test]
     fn md5_core_matches_the_standard() {
