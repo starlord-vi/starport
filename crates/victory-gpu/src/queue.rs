@@ -603,10 +603,63 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
 
 /// The start of a present plane: frame token, then the plane's resources.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Plane {
     token: u64,
     count: u32,
     resources: *const This,
+}
+
+/// Retail PresentX appends source/destination placement, color-space and
+/// option fields to each common plane prefix. GTA VI's second plane starts
+/// at this 72-byte stride, not immediately after [`Plane`].
+#[cfg(windows)]
+#[repr(C)]
+struct RetailPlane {
+    prefix: Plane,
+    source_rects: *const (),
+    destination: *const (),
+    color_space: u32,
+    options: [u32; 7],
+}
+#[cfg(windows)]
+const _: () = assert!(size_of::<RetailPlane>() == 72);
+
+/// Copies a plane prefix out of title-owned memory without directly
+/// dereferencing a possibly unmapped page.
+#[cfg(windows)]
+fn plane_prefix(parameters: *const Plane, index: usize) -> Option<Plane> {
+    if parameters.is_null() {
+        return None;
+    }
+    let source = if index == 0 {
+        parameters.cast::<u8>()
+    } else {
+        parameters
+            .cast::<RetailPlane>()
+            .wrapping_add(index)
+            .cast::<u8>()
+    };
+    let mut bytes = [0; size_of::<Plane>()];
+    crate::host::read_into(source, &mut bytes).then(|| {
+        // SAFETY: `bytes` holds a copied C-layout Plane prefix and unaligned
+        // reads impose no alignment requirement on this local array.
+        unsafe { bytes.as_ptr().cast::<Plane>().read_unaligned() }
+    })
+}
+
+#[cfg(windows)]
+fn plane_resource(parameters: *const Plane, index: usize) -> Option<This> {
+    let plane = plane_prefix(parameters, index)?;
+    if plane.count == 0 || plane.resources.is_null() {
+        return None;
+    }
+    let mut pointer = [0; size_of::<This>()];
+    if !crate::host::read_into(plane.resources.cast(), &mut pointer) {
+        return None;
+    }
+    let resource = usize::from_ne_bytes(pointer) as This;
+    crate::resource::is_resource(resource).then_some(resource)
 }
 /// Submission tagged with the frame it belongs to `(count, lists, frame
 /// token, flags)`; frames are paced elsewhere, so it runs as a plain one.
@@ -843,20 +896,36 @@ extern "system" fn present(
     }
     #[cfg(windows)]
     if planes > 0
-        // SAFETY: the title passes `planes` plane descriptions.
-        && let Some(plane) = unsafe { plane_parameters.as_ref() }
-        && plane.count > 0
-        && !plane.resources.is_null()
-        // SAFETY: the plane lists `count` resources.
-        && let resource = unsafe { *plane.resources }
+        && let Some(resource) = plane_resource(plane_parameters, 0)
         && let Some(texture) = crate::resource::host_resource(resource)
         && let Some(host) = crate::host::host()
     {
         const COPY_SOURCE: u32 = 0x800;
         let state = crate::resource::host_transition(resource, COPY_SOURCE)
             .map_or(COPY_SOURCE, |(_, before)| before);
-        let shown = host.present(&texture.texture, state, frame);
+        let overlay = (planes > 1)
+            .then(|| plane_resource(plane_parameters, 1))
+            .flatten()
+            .filter(|&candidate| candidate != resource)
+            .and_then(|candidate| {
+                crate::resource::host_resource(candidate).map(|texture| {
+                    let state = crate::resource::host_transition(candidate, COPY_SOURCE)
+                        .map_or(COPY_SOURCE, |(_, before)| before);
+                    (candidate, texture, state)
+                })
+            });
+        let shown = host.present_planes(
+            &texture.texture,
+            state,
+            overlay
+                .as_ref()
+                .map(|(_, texture, state)| (&texture.texture, *state)),
+            frame,
+        );
         crate::resource::host_transition(resource, state);
+        if let Some((resource, _, state)) = overlay {
+            crate::resource::host_transition(resource, state);
+        }
         #[cfg(feature = "diagnostics")]
         blinks(frame, resource, state, shown);
         #[cfg(not(feature = "diagnostics"))]
@@ -1033,6 +1102,40 @@ static NEWER_FUNCTIONS: Table<36> = Table(queue_table(true));
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    #[cfg(windows)]
+    #[test]
+    fn retail_present_planes_use_the_72_byte_stride() {
+        let planes = [
+            RetailPlane {
+                prefix: Plane {
+                    token: 11,
+                    count: 1,
+                    resources: std::ptr::null(),
+                },
+                source_rects: std::ptr::null(),
+                destination: std::ptr::null(),
+                color_space: 7,
+                options: [1; 7],
+            },
+            RetailPlane {
+                prefix: Plane {
+                    token: 22,
+                    count: 2,
+                    resources: std::ptr::null(),
+                },
+                source_rects: std::ptr::null(),
+                destination: std::ptr::null(),
+                color_space: 9,
+                options: [2; 7],
+            },
+        ];
+        let parameters = planes.as_ptr().cast::<Plane>();
+        let first = plane_prefix(parameters, 0).expect("first prefix");
+        let second = plane_prefix(parameters, 1).expect("second prefix");
+        assert_eq!((first.token, first.count), (11, 1));
+        assert_eq!((second.token, second.count), (22, 2));
+    }
 
     /// Where a queue's signal is: newer layouts have it two slots later.
     /// Another test may switch layouts while this one runs, so the queue's

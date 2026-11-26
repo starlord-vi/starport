@@ -2186,6 +2186,19 @@ pub(crate) fn host_resource(this: This) -> Option<std::sync::Arc<HostTexture>> {
     hosted(this, true).map(|(host, _)| host)
 }
 
+/// Whether `this` is a readable title resource object created by this
+/// runtime. PresentX plane arrays are title-owned memory, so validate the
+/// object's table before any resource helper dereferences it.
+#[cfg(windows)]
+pub(crate) fn is_resource(this: This) -> bool {
+    if this.is_null() {
+        return false;
+    }
+    let mut table = [0; size_of::<usize>()];
+    crate::host::read_into(this.cast(), &mut table)
+        && usize::from_ne_bytes(table) == RESOURCE_FUNCTIONS.0.as_ptr() as usize
+}
+
 /// A title texture's host copy, shared, for a list to hold.
 #[cfg(windows)]
 pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {

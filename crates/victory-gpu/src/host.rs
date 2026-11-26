@@ -6699,22 +6699,68 @@ impl Host {
     /// Shows `texture`, which is in `state` (a host state) and stays in it,
     /// as frame `frame` (saved if captures are on). `None` if nothing was
     /// shown; else, in diagnostics builds, whether the frame was black.
+    #[allow(dead_code)]
     pub(crate) fn present(&self, texture: &ID3D12Resource, state: u32, frame: u64) -> Option<bool> {
+        self.present_planes(texture, state, None, frame)
+    }
+
+    /// Shows a scene plane and, when valid, the Series S interface plane
+    /// alpha-composited over it. Both source resources are returned to the
+    /// states supplied by the title.
+    pub(crate) fn present_planes(
+        &self,
+        texture: &ID3D12Resource,
+        state: u32,
+        overlay: Option<(&ID3D12Resource, u32)>,
+        frame: u64,
+    ) -> Option<bool> {
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
-        let Some(format) = swap_format(desc.Format) else {
-            tracing::warn!(format = desc.Format.0, "cannot present this format");
-            return None;
+        let overlay_requested = overlay.is_some();
+        let overlay = overlay.and_then(|(resource, state)| {
+            // SAFETY: a live overlay resource held by the caller.
+            let over = unsafe { resource.GetDesc() };
+            Some((
+                resource,
+                D3D12_RESOURCE_STATES(state as i32),
+                crate::present_blit::sampled_format(&desc)?,
+                crate::present_blit::sampled_format(&over)?,
+                (over.Width as u32, over.Height),
+            ))
+        });
+        if overlay_requested && overlay.is_none() {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    base_format = desc.Format.0,
+                    "display overlay is not float-sampleable; presenting the scene plane"
+                );
+            }
+        }
+        let compositing = overlay.is_some();
+        let format = if compositing {
+            DXGI_FORMAT_R8G8B8A8_UNORM
+        } else {
+            let Some(format) = swap_format(desc.Format) else {
+                tracing::warn!(format = desc.Format.0, "cannot present this format");
+                return None;
+            };
+            format
         };
-        let source_size = (desc.Width as u32, desc.Height);
+        let base_size = (desc.Width as u32, desc.Height);
+        let source_size = overlay.map_or(base_size, |(_, _, _, _, over_size)| {
+            (base_size.0.max(over_size.0), base_size.1.max(over_size.1))
+        });
         let (width, height) = crate::display::clamp(source_size);
         let scaled = (width, height) != source_size;
-        let source_read = if scaled {
+        let rendered = scaled || compositing;
+        let source_read = if rendered {
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
         } else {
             D3D12_RESOURCE_STATE_COPY_SOURCE
         };
-        let output_write = if scaled {
+        let output_write = if rendered {
             D3D12_RESOURCE_STATE_RENDER_TARGET
         } else {
             D3D12_RESOURCE_STATE_COPY_DEST
@@ -6753,7 +6799,7 @@ impl Host {
             }
         }
         let state = D3D12_RESOURCE_STATES(state as i32);
-        // SAFETY: our swap chain, list and a live source texture.
+        // SAFETY: our swap chain, list and live source texture(s).
         unsafe {
             let index = p.swap_chain.GetCurrentBackBufferIndex();
             let Ok(back) = p.swap_chain.GetBuffer::<ID3D12Resource>(index) else {
@@ -6799,11 +6845,54 @@ impl Host {
             };
             copy.reset();
             let list = &copy.list;
-            list.ResourceBarrier(&[
-                transition(texture, state, source_read),
-                transition(&back, D3D12_RESOURCE_STATE_PRESENT, output_write),
-            ]);
-            if scaled {
+            let mut pre = Vec::with_capacity(3);
+            if state != source_read {
+                pre.push(transition(texture, state, source_read));
+            }
+            if let Some((resource, over_state, _, _, _)) = overlay
+                && over_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+            {
+                pre.push(transition(
+                    resource,
+                    over_state,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                ));
+            }
+            pre.push(transition(
+                &back,
+                D3D12_RESOURCE_STATE_PRESENT,
+                output_write,
+            ));
+            list.ResourceBarrier(&pre);
+            if let Some((over, _, base_format, over_format, _)) = overlay {
+                if let Err(error) = crate::present_blit::record_composite(
+                    copy,
+                    &self.device,
+                    texture,
+                    base_format,
+                    over,
+                    over_format,
+                    &back,
+                    format,
+                    (width, height),
+                ) {
+                    tracing::error!(%error, ?source_size, width, height, "two-plane presentation composite failed");
+                    copy.close();
+                    return None;
+                }
+                static LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    tracing::info!(
+                        frame,
+                        width,
+                        height,
+                        base_format = base_format.0,
+                        overlay_format = over_format.0,
+                        "display output: compositing Series S scene and interface planes"
+                    );
+                }
+            } else if scaled {
                 if let Err(error) = crate::present_blit::record(
                     copy,
                     &self.device,
@@ -6827,22 +6916,75 @@ impl Host {
                 list.CopyResource(&back, texture);
                 copy.keep(texture);
             }
+            // Composite diagnostics inspect the actual output, after both
+            // planes and scaling, rather than reporting the scene alone.
+            #[cfg(feature = "diagnostics")]
+            let inspect_composite = compositing && slot.is_none();
+            #[cfg(not(feature = "diagnostics"))]
+            let inspect_composite = false;
+            if inspect_composite {
+                list.ResourceBarrier(&[transition(
+                    &back,
+                    output_write,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                )]);
+            }
             #[cfg(feature = "diagnostics")]
             let capture = crate::capture::wanted(frame)
-                .then(|| crate::capture::read_back(&self.device, list, texture))
+                .then(|| {
+                    crate::capture::read_back(
+                        &self.device,
+                        list,
+                        if compositing { &back } else { texture },
+                    )
+                })
                 .flatten();
             #[cfg(feature = "diagnostics")]
             let probe = if slot.is_some() {
                 None
             } else {
-                crate::capture::probe(&self.device, list, texture)
+                crate::capture::probe(
+                    &self.device,
+                    list,
+                    if compositing { &back } else { texture },
+                )
             };
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
-            list.ResourceBarrier(&[
-                transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE, state),
-                transition(&back, output_write, D3D12_RESOURCE_STATE_PRESENT),
-            ]);
+            let mut post = Vec::with_capacity(3);
+            if compositing {
+                if state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
+                    post.push(transition(
+                        texture,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        state,
+                    ));
+                }
+                if let Some((resource, over_state, _, _, _)) = overlay
+                    && over_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                {
+                    post.push(transition(
+                        resource,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        over_state,
+                    ));
+                }
+                post.push(transition(
+                    &back,
+                    if inspect_composite {
+                        D3D12_RESOURCE_STATE_COPY_SOURCE
+                    } else {
+                        output_write
+                    },
+                    D3D12_RESOURCE_STATE_PRESENT,
+                ));
+            } else {
+                post.extend([
+                    transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE, state),
+                    transition(&back, output_write, D3D12_RESOURCE_STATE_PRESENT),
+                ]);
+            }
+            list.ResourceBarrier(&post);
             copy.close();
             match slot {
                 Some(i) => {
