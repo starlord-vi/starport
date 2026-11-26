@@ -14,9 +14,12 @@ use victory_hle::known_pipelines as known;
 
 /// Pipelines a process makes before another takes its place: the compiler's
 /// and the translations' memory goes with it.
-const AT_ONCE: usize = 200;
+const AT_ONCE: usize = 40;
 /// A pipeline that takes longer is taken for one the compiler hangs on.
 const LONGEST: Duration = Duration::from_secs(180);
+
+/// As the runs count one that takes long.
+const SLOW_MS: f64 = 1000.0;
 
 fn folder() -> Result<PathBuf> {
     let cfg = victory_core::Config::load()?;
@@ -34,6 +37,7 @@ pub fn run(
     if let Some(these) = these {
         return make(&dir, &these);
     }
+    std::fs::create_dir_all(&dir).context("create pipeline cache directory")?;
     let began = Instant::now();
     victory_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
     let fingerprint = known::fingerprint();
@@ -89,6 +93,14 @@ pub fn run(
             .append(true)
             .open(&done_file)?,
     );
+    // Runtime scheduling reads these measurements and keeps known-expensive
+    // early compiles from occupying every worker at once.
+    let slow_out = Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("slow-pipelines.txt"))?,
+    );
     let bad_out = Mutex::new(
         std::fs::OpenOptions::new()
             .create(true)
@@ -104,6 +116,9 @@ pub fn run(
                     let mut rest = chunk;
                     while !rest.is_empty() {
                         let child = child(rest, |n, ms, there| {
+                            if ms >= SLOW_MS {
+                                let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
+                            }
                             let mut state = lock(&state);
                             state.0.push(ms);
                             state.1 += usize::from(!there);
@@ -261,11 +276,14 @@ fn make(dir: &Path, these: &str) -> Result<()> {
     victory_hle::known_pipelines::use_translations(cfg.cache_subdir("shaders")?);
     let mut out = std::io::stdout();
     known::make(dir, &these, |n, came| {
-        let _ = match came {
+        let told = match came {
             None => writeln!(out, "at {n}"),
             Some((ms, there)) => writeln!(out, "made {n} {ms:.2} {}", u8::from(there)),
         };
-        let _ = out.flush();
+        if told.and_then(|()| out.flush()).is_err() {
+            // Whoever asked is gone.
+            std::process::exit(1);
+        }
     });
     // Without what a run's end does (nothing to save, the host's threads).
     let _ = out.flush();
