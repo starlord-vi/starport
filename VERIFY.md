@@ -593,3 +593,13 @@ test requires external `STARPORT_DESCRIPTOR_COUNT_FIXTURE`. The recorded
 `ceb5eb68cd99cb07` kernel now translates, validates and creates an NVIDIA PSO.
 Disassembly identifies depth/min reduction, not an RT-builder kernel. This
 fixture check does not execute the kernel with a complete game's inputs.
+
+An exact wave-wide branch retry is also enabled for compute kernels still
+requiring Wave64 when their group contains exactly one 64-lane guest wave.
+The existing branch proof and multiple-guest-wave rejection remain in place.
+`VICTORY_WAVE_WIDE=0` disables it for A/B; no global WaveSize clamp is used.
+The recorded `369cbe906ea72764` culling kernel fails NVIDIA PSO creation
+with the retry disabled and passes with it enabled, with approximate
+local-wave lowering disabled in both checks. A hardware LDS regression
+checks branch results at both sides of lane 32. This is not whole-scene
+equivalence or approval to widen the 128/1024-thread failing kernels.

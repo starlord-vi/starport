@@ -650,6 +650,110 @@ fn a_branch_that_writes_lds_two_different_values_keeps_64_lanes() {
 }
 
 #[test]
+fn one_guest_wave_lds_read_write_branches_execute_exactly_on_nvidia() {
+    let native = flag_program(Some(2));
+    let p = crate::spill::build(&native).unwrap();
+    let st = structure::structure(&p).unwrap();
+    let io = io::raise(&p, &native).unwrap();
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+    let bytes = super::container::build(&[]);
+    let container = crate::Container::parse(&bytes).unwrap();
+    let was = lower::TEST_HOST_WAVE.replace(Some(32));
+    let emitted = super::emit(&container, &native, &p, &st, &io, &res);
+    lower::TEST_HOST_WAVE.set(was);
+    let mut shader = emitted.unwrap();
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("DXIL validator required")
+        .validate(&mut shader.dxil)
+        .unwrap();
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).expect("NVIDIA hardware required");
+    let (root, pso) = host
+        .compute_pipeline(&shader)
+        .expect("Wave32 pipeline required");
+    for below in [0, 1, 31, 32, 33, 63, 64] {
+        for skip_read in [0, 1] {
+            let mut data = vec![0; shader.user_data_dwords() as usize];
+            for u in &shader.user_data {
+                data[u.index as usize] = match (u.root, u.slot, u.dword) {
+                    (RootType::Constants, 0, 0) => below,
+                    (RootType::Constants, 0, 1) => skip_read,
+                    _ => 0,
+                };
+            }
+            let output = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(data))],
+                        views: &[View::RawUav(1)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap();
+            let expected = if below == 0 {
+                0
+            } else if skip_read == 0 {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                output[0][0], expected,
+                "below={below}, skip_read={skip_read}"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_one_wave_retry_never_admits_multiple_guest_waves() {
+    let mut native = flag_program(Some(2));
+    assert!(super::one_guest_wave(&native));
+    native.wave64 = false;
+    assert!(!super::one_guest_wave(&native));
+    native.wave64 = true;
+    for threads in [32, 128, 256, 1024] {
+        if let StageIo::Cs(cs) = &mut native.io {
+            cs.threads = [threads, 1, 1];
+        }
+        assert!(!super::one_guest_wave(&native), "group={threads}");
+    }
+}
+
+#[test]
+#[ignore = "requires external STARPORT_ONE_WAVE_FIXTURE and NVIDIA hardware"]
+fn captured_one_wave_culling_shader_creates_nvidia_pipeline() {
+    let path = std::path::PathBuf::from(std::env::var("STARPORT_ONE_WAVE_FIXTURE").unwrap())
+        .canonicalize()
+        .unwrap();
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    assert!(!path.starts_with(repo), "fixture must remain outside Git");
+    let bytes = std::fs::read(path).unwrap();
+    let was = lower::TEST_HOST_WAVE.replace(Some(32));
+    let translated = super::translate(&bytes);
+    lower::TEST_HOST_WAVE.set(was);
+    let mut shader = translated.unwrap();
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("DXIL validator required")
+        .validate(&mut shader.dxil)
+        .unwrap();
+    let host = Host::new(false).expect("NVIDIA hardware required");
+    host.compute_pipeline(&shader)
+        .expect("Wave32 pipeline required");
+}
+
+#[test]
 fn lds_flag_regions_preserve_the_result_across_two_host_waves_on_gpu() {
     let Ok(host) = Host::new(false) else {
         eprintln!("no SM 6.6 hardware device; LDS flag execution not run");

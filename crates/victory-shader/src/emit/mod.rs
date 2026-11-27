@@ -386,13 +386,12 @@ pub fn emit(
                 }
             }
         }
-        // Off unless asked for (`VICTORY_WAVE_WIDE=1`), for a console wave run as two host
-        // waves: this form puts group barriers inside branches and loops, and runs 121-124
-        // lost the card in a submission of two programs that had just moved to it
-        // (`ptfx_CS_lightAtlas_Sprite` and `_Trail`). The 32-lane programs' form below, which
-        // has no barrier, stays on.
+        // This form puts group barriers inside branches and loops. Preserve the
+        // opt-in for other kernels after historical particle-program timeouts;
+        // the default retry below is limited to one guest wave per group.
         let wide_option = std::env::var_os("VICTORY_WAVE_WIDE");
-        // ACCC polling/reduction kernels have one guest wave per group.
+        // ACCC polling/reduction kernels and LDS kernels still requesting
+        // Wave64 can use this exact retry when the group is one guest wave.
         // Both host halves must take the scalar loop together. widen() only
         // widens branches with a proved wave-any/all meaning and refuses
         // groups containing several guest waves, which could deadlock.
@@ -400,7 +399,9 @@ pub fn emit(
             && matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64)
             && matches!(&original, Err(ShaderError::Unsupported { what, .. })
                 if *what == "a lane mask exchanged where not every lane runs");
-        let wide_on = wide_option.as_ref().map_or(accc_wave, |v| v == "1");
+        let one_wave_lds = matches!(&original, Ok((_, Some(64))))
+            && one_guest_wave(native);
+        let wide_on = wide_option.as_ref().map_or(accc_wave || one_wave_lds, |v| v == "1");
         // exact first: each host wave on its own where that is exact (the idiom, every
         // form; no barriers), then the other exact forms; then approximate
         for exact in [true, false] {
@@ -536,6 +537,11 @@ pub fn emit(
     let io = io::raise(&p, native)?;
     let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
     emit_program(c, native, &p, &st, &io, &res).map(|(shader, _)| shader)
+}
+
+fn one_guest_wave(native: &NativeProgram) -> bool {
+    native.wave64 && matches!(native.io, crate::native::StageIo::Cs(cs)
+        if cs.threads.iter().product::<u32>() == 64)
 }
 
 /// `p` (a console wave64 compute program on a host of 32-lane waves) with the per-lane
