@@ -231,7 +231,8 @@ def main():
     settings = {
         'VICTORY_LOG': 'info',
         'STARPORT_RECORD': '1',
-        'STARPORT_TELEMETRY': os.environ.get('STARPORT_TELEMETRY', '1'),
+        'STARPORT_TELEMETRY': os.environ.get(
+            'STARPORT_TELEMETRY', '0' if args.preset == 'throughput' else '1'),
         'STARPORT_BENCH_OUT': os.environ.get('STARPORT_BENCH_OUT', str(run/'bench.json')),
         'STARPORT_FALLBACK_COLOR': os.environ.get('STARPORT_FALLBACK_COLOR', 'black'),
         'STARPORT_MAX_RES': os.environ.get('STARPORT_MAX_RES', ''),
@@ -257,6 +258,7 @@ def main():
                  'STARPORT_DIRTY_TRACKING', 'STARPORT_REBAR_UPLOAD', 'STARPORT_FRAMES_IN_FLIGHT', 'STARPORT_WATCHDOG',
                  'STARPORT_WATCHDOG_SECONDS', 'STARPORT_WATCHDOG_STACKS', 'STARPORT_MEM_BUDGET_MB',
                  'STARPORT_WAVE64_TRACE', 'STARPORT_WAVE64_EXTRA', 'STARPORT_AMBIENT_TRACE', 'STARPORT_SUBPHASES',
+                 'VICTORY_WAVE_WIDE', 'VICTORY_WAVE_LOCAL',
                  'STARPORT_MEMORY_EVERY_N', 'STARPORT_BENCH', 'STARPORT_BENCH_AFTER_SECONDS',
                  'STARPORT_PROGRESSIVE_TEXTURES', 'STARPORT_TEXTURE_STAGE_MS', 'STARPORT_TAIL_BUDGET_MB', 'STARPORT_EVICTOR_V2',
                  'STARPORT_EVICT_MIN_BYTES', 'STARPORT_EVICT_MIN_RESIDENCY_MS',
@@ -285,6 +287,17 @@ def main():
         # buffer copies use GPU-side comparison within a bounded extra 768 MiB
         # allocation budget. Explicit environment values remain A/B overrides.
         for name, value in {
+            # The guarded local profile that reached the world in run
+            # 20261127T013200.383650Z. This is not FPS/visual acceptance.
+            'STARPORT_WAVE64_EXTRA': '0',
+            'STARPORT_PROGRESSIVE_TEXTURES': '0',
+            'STARPORT_TEXTURE_STAGE_MS': '64',
+            'STARPORT_WORKER_THREADS': '6',
+            'STARPORT_WAVE64_TRACE': '0',
+            'STARPORT_AMBIENT_TRACE': '0',
+            'VICTORY_CARD_WINDOWS_MB': '512',
+            'VICTORY_WINDOW_KB': '256',
+            'VICTORY_WINDOW_TAILS': '1',
             'VICTORY_RELAY': '2',
             'VICTORY_WIDE_BACK': '1',
             'VICTORY_CARD_REHASH_RUNS': '1',

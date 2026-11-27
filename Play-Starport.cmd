@@ -16,7 +16,12 @@ rem Default performance profile: relay stage 2, wide/readback joins, GPU-side
 rem comparison for >=1 MiB title buffers, and a 64-pass unchanged-slot census.
 rem Pass --preset balanced to disable those defaults for an A/B. Explicit
 rem VICTORY_* values override every throughput default.
-rem Pass 2 defaults: progressive tails=1, evictor V2=1, selfwrite=reset (safe compare).
+rem Tested local throughput profile: progressive tails=0, staging slice=64ms,
+rem CPU workers=6, GPU loose windows=512MiB, buffer cells=256KiB with full tails.
+rem Detailed binding/ambient traces default off; frame/memory logs remain enabled.
+rem STARPORT_PROGRESSIVE_TEXTURES=1 opts back into progressive tails.
+rem STARPORT_WAVE64_EXTRA=1 is experimental: offline passes, world-entry TDRs.
+rem Evictor V2=1 and selfwrite=reset retain their existing defaults.
 rem STARPORT_SKIP_MIPS_TARGET_DIM=1024 explicitly selects a 1024px streaming target; 0 restores fixed N.
 rem STARPORT_PARALLEL_WORK=0, STARPORT_XXH3=0, STARPORT_RETAINED_MIP_READS=0 restore old CPU paths.
 rem STARPORT_MEM_BUDGET_MB=8192/6144 also caps idle caches; STARPORT_TRIM_CACHES=0 disables that cap.

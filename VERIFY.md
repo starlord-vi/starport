@@ -640,3 +640,33 @@ are unchanged. A concurrent lookup/retirement regression verifies stable
 identities and rejection of stale records after entry reuse. This removes
 unnecessary exclusive locking; a runtime FPS improvement is not inferred
 from the concurrency test.
+
+## Guarded local run and launcher profile
+
+Run `20261127T013200.383650Z` used core commit `a3aba1c`, release SHA-256
+`3d1501f77fab18084fec8bce62505b1520ba575bafe0132ba25c1e82f56af912`.
+It reached a recognizable world and exited 0 without forced termination.
+Original metadata/binary checks passed; recorder loss and sequence gaps were
+zero. The last 30 seconds averaged 2.2416 FPS, median 445.972 ms. Its separate
+30-second scene window contained 67 frames, median 444.025 ms, p95 468.040 ms.
+The scene still has dark/material defects. The requested 10–15 FPS and full
+lighting/texture acceptance have not been achieved.
+
+`Play-Starport.cmd` / `--preset throughput` now use this tested local profile:
+`STARPORT_WAVE64_EXTRA=0`, `STARPORT_PROGRESSIVE_TEXTURES=0`,
+`STARPORT_TEXTURE_STAGE_MS=64`, `STARPORT_WORKER_THREADS=6`,
+`VICTORY_CARD_WINDOWS_MB=512`, `VICTORY_WINDOW_KB=256`,
+`VICTORY_WINDOW_TAILS=1`. Detailed telemetry, Wave64 and ambient traces default
+off; ordinary frame/memory/counter logging remains enabled. Existing relay,
+GPU comparison and indirect-window throughput settings remain. Explicit
+environment overrides still win, and `--preset balanced`/`baseline` do not
+apply these throughput overrides. Engine defaults described elsewhere in
+this document may differ from the launcher profile.
+
+The expanded Wave64 experiment crashed in runs `20261127T011624.148841Z`,
+`20261127T011951.491384Z`, and `20261127T012343.924702Z`. The third disabled
+async submission; DRED still stopped at ExecuteIndirect. This does not
+identify a specific shader as the cause. The later diagnostic
+`20261127T014003.024232Z` remained in menus, so its 30 FPS is not a world result.
+Further diagnostics use stable command-list names for DRED matching and
+bounded UTF-8 failure records to retain large reports without logger truncation.
