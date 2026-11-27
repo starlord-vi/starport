@@ -529,6 +529,22 @@ pub fn on_failure(report: fn(&str) -> !) {
 /// Ends the run on a host GPU failure: what failed, the removal reason and
 /// the debug layer's first error, if any (`VICTORY_D3D12_DEBUG=1` in a
 /// diagnostics build names the command).
+fn failure_chunks(text: &str) -> impl Iterator<Item = &str> {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        if start == text.len() {
+            return None;
+        }
+        let mut end = (start + 24_000).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &text[start..end];
+        start = end;
+        Some(chunk)
+    })
+}
+
 pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
     let mut text = what.to_string();
     if let Some(host) = host() {
@@ -545,7 +561,9 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
             None => {}
         }
     }
-    tracing::error!("{text}");
+    for (part, chunk) in failure_chunks(&text).enumerate() {
+        tracing::error!(part = part + 1, "{chunk}");
+    }
     // Tests have no log: the reason goes to their output.
     #[cfg(test)]
     eprintln!("host GPU failure: {text}");
@@ -744,6 +762,20 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_failure_reports_preserve_all_utf8_without_oversized_log_records() {
+        let text = format!(
+            "{}{}{}",
+            "x".repeat(23_999),
+            "世界🙂".repeat(10_000),
+            "tail"
+        );
+        let chunks: Vec<_> = super::failure_chunks(&text).collect();
+        assert!(chunks.len() > 3);
+        assert!(chunks.iter().all(|c| !c.is_empty() && c.len() <= 24_000));
+        assert_eq!(chunks.concat(), text);
+        assert_eq!(super::failure_chunks("").count(), 0);
+    }
     #[test]
     fn texture_states_cover_every_host_shader_stage() {
         assert_eq!(super::texture_state(0x80), 0xc0);
@@ -1344,8 +1376,12 @@ fn timing() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_GPU_TIMING").is_some())
 }
 
-/// Names a host object for the device-removed report, which names the
-/// allocations a page fault hit (only with device-removed data on).
+/// Stable text identity even when DRED returns an underlying COM pointer.
+fn command_list_name(list: &ID3D12GraphicsCommandList) -> String {
+    format!("Starport command list {:p}", list.as_raw())
+}
+
+/// Names a host object in device-removed reports (DRED only).
 pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {
     if dred_on()
         && let Ok(object) = object.cast::<ID3D12Object>()
@@ -3112,6 +3148,7 @@ impl Host {
                 &allocator,
                 None,
             )?;
+            name(&list, || command_list_name(&list));
             let prelude = OnceLock::new();
             if !lazy_prelude() {
                 let _ = prelude.set(self.make_prelude());
@@ -4734,7 +4771,15 @@ impl Host {
             while let Some(p) = node.as_ref() {
                 let done = p.pLastBreadcrumbValue.as_ref().copied().unwrap_or(0);
                 let ours = p.pCommandList.as_ref().map(|l| l.as_raw());
-                let index = runs.iter().position(|r| Some(r.list.as_raw()) == ours);
+                let named = (!p.pCommandListDebugNameW.is_null())
+                    .then(|| p.pCommandListDebugNameW.to_string().ok())
+                    .flatten();
+                let index = runs.iter().position(|r| {
+                    Some(r.list.as_raw()) == ours
+                        || named
+                            .as_ref()
+                            .is_some_and(|n| *n == command_list_name(&r.list))
+                });
                 progress.push(format!("{done}/{} {index:?}", p.BreadcrumbCount));
                 node = p.pNext;
             }
@@ -4750,7 +4795,15 @@ impl Host {
                         p.BreadcrumbCount, history[done as usize].0
                     ));
                     let list = p.pCommandList.as_ref().map(|l| l.as_raw());
-                    let run = runs.iter().find(|r| Some(r.list.as_raw()) == list);
+                    let named = (!p.pCommandListDebugNameW.is_null())
+                        .then(|| p.pCommandListDebugNameW.to_string().ok())
+                        .flatten();
+                    let run = runs.iter().find(|r| {
+                        Some(r.list.as_raw()) == list
+                            || named
+                                .as_ref()
+                                .is_some_and(|n| *n == command_list_name(&r.list))
+                    });
                     // The k-th marker command is the k-th note.
                     #[cfg(feature = "diagnostics")]
                     let markers: Vec<(u32, String)> = run.map_or_else(Vec::new, |r| {

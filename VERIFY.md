@@ -594,10 +594,14 @@ test requires external `STARPORT_DESCRIPTOR_COUNT_FIXTURE`. The recorded
 Disassembly identifies depth/min reduction, not an RT-builder kernel. This
 fixture check does not execute the kernel with a complete game's inputs.
 
-An exact wave-wide branch retry is also enabled for compute kernels blocked
+An experimental exact wave-wide branch retry covers compute kernels blocked
 on cross-lane work when their group contains exactly one 64-lane guest wave.
+`STARPORT_WAVE64_EXTRA=1` opts into coverage outside the established ACCC
+retry. It is off by default after three world-entry TDRs, including a run
+with async submission disabled. Offline success is not runtime acceptance.
 The existing branch proof and multiple-guest-wave rejection remain in place.
-`VICTORY_WAVE_WIDE=0` disables it for A/B; no global WaveSize clamp is used.
+`VICTORY_WAVE_WIDE=0` disables all widening for diagnosis, including ACCC;
+`1` explicitly enables the older broad opt-in. No global WaveSize clamp is used.
 The recorded `369cbe906ea72764` culling kernel fails NVIDIA PSO creation
 with the retry disabled and passes with it enabled, with approximate
 local-wave lowering disabled in both checks. A hardware LDS regression
@@ -621,6 +625,9 @@ The ignored `captured_double_shaders_validate_and_create_nvidia_pipelines`
 test needs external `STARPORT_DOUBLE_INPUTS` and asserts all three recorded
 FP64 kernels translate, validate and create NVIDIA PSOs. Fixtures stay
 outside Git. This is pipeline acceptance, not game-image equivalence.
+Both recorded-kernel tests require `STARPORT_WAVE64_EXTRA=1`. This flag and
+`VICTORY_WAVE_LOCAL` enter the shader/pipeline cache fingerprint so an A/B
+cannot reuse translations generated under the other policy.
 
 Primary specifications: [DXIL types, casts and shader flags](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst),
 [D3D shader requirement flags](https://learn.microsoft.com/en-us/windows/win32/api/d3d11shader/nf-d3d11shader-id3d11shaderreflection-getrequiresflags)

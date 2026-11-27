@@ -835,7 +835,7 @@ fn exact_one_wave_retry_never_admits_multiple_guest_waves() {
 }
 
 #[test]
-#[ignore = "requires external STARPORT_ONE_WAVE_FIXTURE and NVIDIA hardware"]
+#[ignore = "requires STARPORT_WAVE64_EXTRA=1, external STARPORT_ONE_WAVE_FIXTURE and NVIDIA hardware"]
 fn captured_one_wave_culling_shader_creates_nvidia_pipeline() {
     let path = std::path::PathBuf::from(std::env::var("STARPORT_ONE_WAVE_FIXTURE").unwrap())
         .canonicalize()

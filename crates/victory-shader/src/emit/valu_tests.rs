@@ -101,7 +101,7 @@ fn double_add_and_float_conversion_execute_against_ieee_oracles() {
 }
 
 #[test]
-#[ignore = "requires external STARPORT_DOUBLE_INPUTS and NVIDIA hardware"]
+#[ignore = "requires STARPORT_WAVE64_EXTRA=1, external STARPORT_DOUBLE_INPUTS and NVIDIA hardware"]
 fn captured_double_shaders_validate_and_create_nvidia_pipelines() {
     let directory = std::path::PathBuf::from(std::env::var("STARPORT_DOUBLE_INPUTS").unwrap())
         .canonicalize()

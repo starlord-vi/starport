@@ -395,7 +395,13 @@ pub fn emit(
         // Both host halves must take the scalar loop together. widen() only
         // widens branches with a proved wave-any/all meaning and refuses
         // groups containing several guest waves, which could deadlock.
-        let wide_on = wide_option.as_ref().map_or(one_guest_wave(native), |v| v == "1");
+        // Larger coverage passed offline but hit a world-entry TDR. Keep
+        // those retries experimental until their complete pass graph works.
+        let extra = std::env::var_os("STARPORT_WAVE64_EXTRA").is_some_and(|v| v == "1");
+        let accc = c.part(FourCC::ACCC).is_some()
+            && matches!(&original, Err(ShaderError::Unsupported { what, .. })
+                if *what == "a lane mask exchanged where not every lane runs");
+        let wide_on = wide_option.as_ref().map_or(one_guest_wave(native) && (accc || extra), |v| v == "1");
         // exact first: each host wave on its own where that is exact (the idiom, every
         // form; no barriers), then the other exact forms; then approximate
         for exact in [true, false] {

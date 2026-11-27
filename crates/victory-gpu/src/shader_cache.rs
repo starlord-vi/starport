@@ -62,6 +62,8 @@ fn build() -> &'static [u8; 32] {
                 // executable had cached with the switch unset.
                 for name in [
                     "VICTORY_WAVE_WIDE",
+                    "STARPORT_WAVE64_EXTRA",
+                    "VICTORY_WAVE_LOCAL",
                     "VICTORY_WAVE_DEEP_SKIPS",
                     "VICTORY_WAVE_OWN_BITS",
                     "VICTORY_F16_NEAREST",
