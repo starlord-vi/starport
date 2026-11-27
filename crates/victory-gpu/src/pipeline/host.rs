@@ -437,8 +437,13 @@ impl HostPipeline {
         let mut ranges: Vec<Box<D3D12_DESCRIPTOR_RANGE1>> = Vec::new();
         let mut samplers = Vec::new();
         let mut bound = Vec::new();
+        let mut direct_heaps = D3D12_ROOT_SIGNATURE_FLAG_NONE;
         for &(shader, visibility) in &stages {
             let t = &shader.translated()?.host;
+            let Some(flags) = direct_heap_flags(&t.dxil) else {
+                return refuse("translated shader lacks valid SFI0 heap metadata", shaders);
+            };
+            direct_heaps |= flags;
             let mut stage = Stage {
                 shader: shader.clone(),
                 user_data: None,
@@ -558,14 +563,19 @@ impl HostPipeline {
             }
             bound.push(stage);
         }
-        let (root, root_blob) =
-            match root_signature(&host.device, &params, &samplers, compute.is_some()) {
-                Ok(root) => root,
-                Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host root signature refused");
-                    return None;
-                }
-            };
+        let (root, root_blob) = match root_signature(
+            &host.device,
+            &params,
+            &samplers,
+            compute.is_some(),
+            direct_heaps,
+        ) {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::warn!(error = %e, ?shaders, "host root signature refused");
+                return None;
+            }
+        };
         let code = |i: usize| {
             stages.get(i).and_then(|(s, _)| s.translated()).map_or(
                 D3D12_SHADER_BYTECODE::default(),
@@ -891,11 +901,30 @@ fn code_bytes(code: &D3D12_SHADER_BYTECODE) -> Vec<u8> {
         .to_vec()
 }
 
+/// SFI0 describes actual heap indexing, including indexing added by lowering.
+/// Static samplers do not require a directly indexed sampler heap. Declaring
+/// that unused flag made resource-only dispatches invalid when no sampler
+/// heap was bound (D3D12 message 1419).
+fn direct_heap_flags(dxil: &[u8]) -> Option<D3D12_ROOT_SIGNATURE_FLAGS> {
+    let container = victory_shader::Container::parse(dxil).ok()?;
+    let bytes = container.part(victory_shader::FourCC::SFI0)?.data;
+    let features = u64::from_le_bytes(bytes.try_into().ok()?);
+    let mut flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    if features & 0x200_0000 != 0 {
+        flags |= D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+    }
+    if features & 0x400_0000 != 0 {
+        flags |= D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+    }
+    Some(flags)
+}
+
 fn root_signature(
     device: &ID3D12Device,
     params: &[D3D12_ROOT_PARAMETER1],
     samplers: &[D3D12_STATIC_SAMPLER_DESC],
     compute: bool,
+    direct_heaps: D3D12_ROOT_SIGNATURE_FLAGS,
 ) -> windows::core::Result<(ID3D12RootSignature, Vec<u8>)> {
     let input = if compute {
         D3D12_ROOT_SIGNATURE_FLAG_NONE
@@ -910,9 +939,7 @@ fn root_signature(
                 pParameters: params.as_ptr(),
                 NumStaticSamplers: samplers.len() as u32,
                 pStaticSamplers: samplers.as_ptr(),
-                Flags: input
-                    | D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
-                    | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+                Flags: input | direct_heaps,
             },
         },
     };
@@ -990,6 +1017,78 @@ mod tests {
         }
     }
 
+    /// Only the two direct-indexing feature bits require heap root flags.
+    #[test]
+    fn root_heap_flags_follow_sfi0_and_reject_missing_metadata() {
+        let build = |tag: &[u8; 4], data: &[u8]| {
+            let mut bytes = b"DXBC".to_vec();
+            bytes.extend([0u8; 16]); // Parser does not validate the container hash.
+            for word in [1u32, 44 + data.len() as u32, 1, 36] {
+                bytes.extend(word.to_le_bytes());
+            }
+            bytes.extend(tag);
+            bytes.extend((data.len() as u32).to_le_bytes());
+            bytes.extend(data);
+            bytes
+        };
+        for (features, expected) in [
+            (0u64, D3D12_ROOT_SIGNATURE_FLAG_NONE),
+            (
+                0x200_0000,
+                D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED,
+            ),
+            (
+                0x400_0000,
+                D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+            ),
+            (
+                0x600_0000,
+                D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+                    | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+            ),
+        ] {
+            let dxil = build(b"SFI0", &features.to_le_bytes());
+            assert_eq!(direct_heap_flags(&dxil), Some(expected));
+        }
+        assert_eq!(direct_heap_flags(&build(b"TEST", &[0; 8])), None);
+        assert_eq!(direct_heap_flags(&build(b"SFI0", &[0; 7])), None);
+    }
+
+    /// A resource-only compute root can be bound without a sampler heap.
+    #[test]
+    fn resource_only_root_does_not_require_a_sampler_heap() {
+        use windows::core::Interface;
+        let h = host().expect("D3D12 hardware required");
+        if std::env::var_os("VICTORY_D3D12_DEBUG").is_some() {
+            h.device
+                .cast::<ID3D12InfoQueue>()
+                .expect("requested debug layer required");
+            assert!(h.log_messages().is_none(), "invalid test setup");
+        }
+        let flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+        let (root, _) = root_signature(&h.device, &[], &[], true, flags).unwrap();
+        let heap: ID3D12DescriptorHeap = unsafe {
+            h.device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: 1,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+        let list = h.new_list().unwrap();
+        unsafe {
+            list.list.SetDescriptorHeaps(&[Some(heap)]);
+            list.list.SetComputeRootSignature(&root);
+        }
+        assert!(
+            h.log_messages().is_none(),
+            "a resource-only root required an absent sampler heap"
+        );
+        list.close();
+    }
+
     /// A mesh pipeline made once is loaded from the library the next time,
     /// not compiled again (a stream without a topology never loads).
     #[test]
@@ -1008,7 +1107,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ms = compile(&dxc, dir.path(), MS, "ms_6_5");
         let ps = compile(&dxc, dir.path(), PS, "ps_6_5");
-        let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
+        let (root, root_blob) = root_signature(
+            &host.device,
+            &[],
+            &[],
+            false,
+            D3D12_ROOT_SIGNATURE_FLAG_NONE,
+        )
+        .unwrap();
         let mut g = GraphicsState::default();
         // This pipeline has only a color target, with no depth buffer.
         g.depth.DepthEnable = false.into();

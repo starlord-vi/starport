@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::core::{Result, s};
 
 const SOURCE: &str = r#"
-#define ROOT "DescriptorTable(SRV(t0)),RootConstants(num32BitConstants=2,b0),StaticSampler(s0,filter=FILTER_MIN_MAG_MIP_LINEAR,addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP)"
+#define ROOT "DescriptorTable(SRV(t0),visibility=SHADER_VISIBILITY_PIXEL),RootConstants(num32BitConstants=2,b0,visibility=SHADER_VISIBILITY_PIXEL),StaticSampler(s0,visibility=SHADER_VISIBILITY_PIXEL,filter=FILTER_MIN_MAG_MIP_LINEAR,addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP)"
 Texture2D<float4> image : register(t0);
 SamplerState linear_clamp : register(s0);
 cbuffer Size : register(b0) { uint width; uint height; }
@@ -29,7 +29,7 @@ float4 ps(float4 p:SV_Position):SV_Target {
 "#;
 
 const COMPOSE_SOURCE: &str = r#"
-#define ROOT "DescriptorTable(SRV(t0,numDescriptors=2)),RootConstants(num32BitConstants=2,b0),StaticSampler(s0,filter=FILTER_MIN_MAG_MIP_LINEAR,addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP)"
+#define ROOT "DescriptorTable(SRV(t0,numDescriptors=2),visibility=SHADER_VISIBILITY_PIXEL),RootConstants(num32BitConstants=2,b0,visibility=SHADER_VISIBILITY_PIXEL),StaticSampler(s0,visibility=SHADER_VISIBILITY_PIXEL,filter=FILTER_MIN_MAG_MIP_LINEAR,addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP)"
 Texture2D<float4> scene : register(t0);
 Texture2D<float4> overlay : register(t1);
 SamplerState linear_clamp : register(s0);
@@ -448,6 +448,13 @@ mod tests {
     #[test]
     fn composite_scales_scene_and_blends_premultiplied_overlay() {
         let h = crate::host::host().expect("D3D12 test device");
+        if std::env::var_os("VICTORY_D3D12_DEBUG").is_some() {
+            use windows::core::Interface;
+            h.device
+                .cast::<ID3D12InfoQueue>()
+                .expect("requested D3D12 debug layer required");
+            assert!(h.log_messages().is_none(), "invalid test setup");
+        }
         // SAFETY: all resources, descriptors and copy footprints are owned by
         // this test and retained until the synchronous execution completes.
         unsafe {
@@ -545,6 +552,7 @@ mod tests {
                 (3, 1),
             )
             .unwrap();
+            assert!(h.log_messages().is_none(), "invalid presentation bindings");
             list.list.ResourceBarrier(&[transition(
                 &output,
                 D3D12_RESOURCE_STATE_RENDER_TARGET,

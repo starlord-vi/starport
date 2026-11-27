@@ -571,3 +571,11 @@ The launcher now uses the release backend by default. `--capture`,
 `--d3d12-debug` or `--dred` select the diagnostics backend automatically;
 an explicit `--backend` always wins. Their executable fingerprints differ,
 so shader warm-up must use the same backend that the run will use.
+
+The 2026-11-27 D3D12 debug run exposed two binding errors. Presentation
+tables/constants/samplers now have pixel visibility, matching their read
+states (message 538). Guest pipeline root signatures derive direct heap
+flags from each emitted SFI0 feature mask, so resource-only compute does
+not require an absent sampler heap (message 1419). Both hardware debug
+regressions failed before their fixes and passed afterward. These are
+binding correctness results; they do not establish correct world lighting.
