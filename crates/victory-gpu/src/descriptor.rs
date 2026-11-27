@@ -405,7 +405,7 @@ struct Views {
     shape_index: std::collections::BTreeMap<Shape, u32>,
 }
 
-static VIEWS: std::sync::Mutex<Views> = std::sync::Mutex::new(Views {
+static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
     list: Vec::new(),
     index: std::collections::BTreeMap::new(),
     by_resource: std::collections::BTreeMap::new(),
@@ -583,8 +583,19 @@ fn words_for(view: View) -> [u32; 2] {
             View::Placed(unordered, resource, desc) => {
                 let (shape, address) = shape_of(*unordered, resource, desc);
                 if address >> PLACED_ADDRESS_BITS == 0 {
-                    let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(shape) = views.shape(shape) {
+                    let existing = VIEWS
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .shape_index
+                        .get(&shape)
+                        .copied();
+                    let shape = existing.or_else(|| {
+                        VIEWS
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .shape(shape)
+                    });
+                    if let Some(shape) = shape {
                         NAMED_WHOLE[1].fetch_add(1, Relaxed);
                         return placed_words(shape, address);
                     }
@@ -593,7 +604,17 @@ fn words_for(view: View) -> [u32; 2] {
             _ => {}
         }
     }
-    VIEWS.lock().unwrap_or_else(|e| e.into_inner()).entry(view)
+    // Most title writes name an existing view. Readers can resolve those
+    // concurrently with submission snapshots. Release the read guard before
+    // taking the write guard; entry() rechecks after that transition.
+    let existing = {
+        let views = VIEWS.read().unwrap_or_else(|e| e.into_inner());
+        views
+            .index
+            .get(&view)
+            .map(|&i| [i, views.list[i as usize].1])
+    };
+    existing.unwrap_or_else(|| VIEWS.write().unwrap_or_else(|e| e.into_inner()).entry(view))
 }
 
 /// For the memory line: the distinct views kept ([`Views`]), those of them
@@ -607,7 +628,7 @@ fn words_for(view: View) -> [u32; 2] {
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn views_kept() -> [u64; 8] {
     use std::sync::atomic::Ordering::Relaxed;
-    let views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let views = VIEWS.read().unwrap_or_else(|e| e.into_inner());
     let each = size_of::<(View, u32)>() as u64;
     let shape = size_of::<Shape>() as u64;
     let (mut constants, mut placed) = (0, 0);
@@ -769,7 +790,7 @@ pub(crate) fn forget(resource: usize) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&resource);
-    let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut views = VIEWS.write().unwrap_or_else(|e| e.into_inner());
     let Some(entries) = views.by_resource.remove(&resource) else {
         return;
     };
@@ -794,13 +815,13 @@ pub(crate) fn forget(resource: usize) {
 fn view_at(i: u32, generation: u32) -> Option<View> {
     match generation >> KIND_SHIFT {
         0 => {
-            let views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+            let views = VIEWS.read().unwrap_or_else(|e| e.into_inner());
             let (view, current) = views.list.get(i as usize)?;
             (*current == generation).then(|| view.clone())
         }
         CONSTANT => Some(constant_of(i, generation)),
         PLACED => VIEWS
-            .lock()
+            .read()
             .unwrap_or_else(|e| e.into_inner())
             .placed_of(i, generation),
         _ => None,
@@ -1251,7 +1272,7 @@ mod tests {
         };
         let entries = || {
             VIEWS
-                .lock()
+                .read()
                 .unwrap()
                 .list
                 .iter()
@@ -1260,7 +1281,7 @@ mod tests {
         };
         let shapes = || {
             VIEWS
-                .lock()
+                .read()
                 .unwrap()
                 .shapes
                 .iter()
@@ -1297,6 +1318,32 @@ mod tests {
         assert_eq!(words(at), words(other.as_ptr() as u64));
         create_cbv(null, &[0x140, 6, 512, 0], other.as_ptr() as u64);
         assert_ne!(words(at), words(other.as_ptr() as u64));
+    }
+
+    #[test]
+    fn concurrent_descriptor_lookup_preserves_generation_after_retirement() {
+        let owner = Box::new(0u64);
+        let resource = std::ptr::from_ref(owner.as_ref()) as usize;
+        let view = View::Shader(resource, Some([0; 10]));
+        let before = words_for(view.clone());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let view = &view;
+                scope.spawn(move || {
+                    for _ in 0..2_000 {
+                        assert_eq!(words_for(view.clone()), before);
+                        assert_eq!(view_at(before[0], before[1]), Some(view.clone()));
+                    }
+                });
+            }
+        });
+        forget(resource);
+        assert_eq!(view_at(before[0], before[1]), None);
+        let after = words_for(view.clone());
+        assert_ne!(after, before);
+        assert_eq!(view_at(before[0], before[1]), None);
+        assert_eq!(view_at(after[0], after[1]), Some(view));
+        forget(resource);
     }
 
     /// A released resource's views go stale; the same view of a new

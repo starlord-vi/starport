@@ -625,3 +625,11 @@ outside Git. This is pipeline acceptance, not game-image equivalence.
 Primary specifications: [DXIL types, casts and shader flags](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst),
 [D3D shader requirement flags](https://learn.microsoft.com/en-us/windows/win32/api/d3d11shader/nf-d3d11shader-id3d11shaderreflection-getrequiresflags)
 and [AMD RDNA2 ISA](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf).
+
+The descriptor registry permits concurrent read-only lookup of existing
+views/shapes. New entries, new shapes and resource retirement retain an
+exclusive lock, with a second lookup after acquiring it. Generation checks
+are unchanged. A concurrent lookup/retirement regression verifies stable
+identities and rejection of stale records after entry reuse. This removes
+unnecessary exclusive locking; a runtime FPS improvement is not inferred
+from the concurrency test.
