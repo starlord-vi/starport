@@ -566,3 +566,8 @@ The ignored `captured_world_pixels_validate_offline` test requires external
 `STARPORT_SHADER_AUDIT_OUT`. It asserts every fixture translates as a pixel
 shader and validates. DXIL dumps stay outside Git. This is not a graphics
 pipeline or rendered-pixel equivalence test.
+
+The launcher now uses the release backend by default. `--capture`,
+`--d3d12-debug` or `--dred` select the diagnostics backend automatically;
+an explicit `--backend` always wins. Their executable fingerprints differ,
+so shader warm-up must use the same backend that the run will use.

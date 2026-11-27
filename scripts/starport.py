@@ -162,7 +162,7 @@ def main():
     parser.add_argument('--assets', type=Path, default=root/'files')
     parser.add_argument('--state', type=Path, default=root/'runtime'/'starport')
     parser.add_argument('--backend', type=Path,
-                        default=root/'compat'/'starport_build'/'diag'/'victory.exe')
+                        help='Explicit backend; otherwise release, or diag for capture/debug flags')
     parser.add_argument('--seconds', type=int, default=600)
     parser.add_argument('--preset', choices=('baseline','balanced','throughput'), default='balanced')
     parser.add_argument('--ambient', default='0.6', help='Constant indirect-light fallback level, or off; not ray tracing')
@@ -191,6 +191,9 @@ def main():
     parser.add_argument('--dred', action='store_true',
                         help='Record D3D12 device-removed breadcrumbs and page-fault data')
     args = parser.parse_args()
+    if args.backend is None:
+        profile = 'diag' if args.capture or args.d3d12_debug or args.dred else 'release'
+        args.backend = root/'compat'/'starport_build'/profile/'victory.exe'
     mip_override = args.skip_mips
     if mip_override is None and args.skip_top_mip is not None:
         mip_override = int(args.skip_top_mip)
