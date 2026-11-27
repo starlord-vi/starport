@@ -858,7 +858,9 @@ impl State {
         dword: u32,
         memory: Option<&crate::memory::Ready>,
     ) -> u32 {
-        use victory_shader::emit::{USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
+        use victory_shader::emit::{
+            USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS, USER_VIEW_RECORDS,
+        };
         if kind == USER_MEMORY_BASE {
             return memory.map_or(0, |m| m.base);
         }
@@ -872,6 +874,14 @@ impl State {
                     let base = unsafe { s.buffer.GetGPUVirtualAddress() };
                     ((s.gpu(address) - base) & 15) as u32
                 }),
+                _ => 0,
+            };
+        }
+        if kind == USER_VIEW_RECORDS {
+            return match self.roots_ref(compute).get(usize::from(slot)) {
+                Some(&Root::Table(table)) => crate::descriptor::view(table + u64::from(dword) * 4)
+                    .and_then(|view| crate::descriptor::host::buffer_records(&view))
+                    .unwrap_or(0),
                 _ => 0,
             };
         }

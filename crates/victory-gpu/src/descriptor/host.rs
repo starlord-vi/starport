@@ -1980,6 +1980,31 @@ fn element_size(desc: &D3D12_SHADER_RESOURCE_VIEW_DESC) -> u64 {
     }
 }
 
+/// NUM_RECORDS of a console buffer descriptor. Read the title's original
+/// declaration, before host range clamping or structured-to-raw conversion.
+/// A null resource is a null descriptor even with a nonzero supplied shape.
+pub(crate) fn buffer_records(view: &View) -> Option<u32> {
+    let (unordered, desc, null) = match view {
+        View::Shader(resource, Some(desc)) if desc[1] == 1 => (false, &desc[..], *resource == 0),
+        View::Unordered(resource, _, Some(desc)) if desc[1] == 1 => {
+            (true, &desc[..], *resource == 0)
+        }
+        View::Placed(unordered, resource, desc) if resource[0] == 1 && desc[1] == 1 => {
+            (*unordered, &desc[..], desc[10] == 0 && desc[11] == 0)
+        }
+        _ => return None,
+    };
+    if null {
+        return Some(0);
+    }
+    let elements = desc[if unordered { 4 } else { 6 }];
+    if desc[8] & 1 != 0 {
+        elements.checked_mul(4)
+    } else {
+        Some(elements)
+    }
+}
+
 /// The title memory a buffer shader or unordered access view reads: its
 /// address and length.
 pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
@@ -3052,6 +3077,46 @@ mod tests {
         host.mirror(3, handle, true).unwrap();
         assert_eq!(host.shows(3, &image.texture), Some(true));
         crate::object::slot::<extern "system" fn(crate::object::This) -> u32>(title, 0x10)(title);
+    }
+
+    /// Source descriptor counts survive host view conversion and nulls.
+    #[test]
+    fn descriptor_record_counts_preserve_raw_bytes_and_structured_elements() {
+        let mut srv = [0u32; 10];
+        srv[1] = 1;
+        srv[6] = 17;
+        srv[7] = 16;
+        assert_eq!(buffer_records(&View::Shader(1, Some(srv))), Some(17));
+        assert_eq!(buffer_records(&View::Shader(0, Some(srv))), Some(0));
+        srv[7] = 0;
+        srv[8] = 1;
+        assert_eq!(buffer_records(&View::Shader(1, Some(srv))), Some(68));
+        srv[6] = 1 << 30;
+        assert_eq!(buffer_records(&View::Shader(1, Some(srv))), None);
+        let mut uav = [0u32; 10];
+        uav[1] = 1;
+        uav[4] = 13;
+        uav[5] = 12;
+        assert_eq!(buffer_records(&View::Unordered(1, 0, Some(uav))), Some(13));
+        uav[5] = 0;
+        uav[8] = 1;
+        assert_eq!(buffer_records(&View::Unordered(1, 0, Some(uav))), Some(52));
+        let mut placed = [0u32; 16];
+        placed[..10].copy_from_slice(&uav);
+        placed[10] = 0x1000;
+        let mut resource = [0u32; 14];
+        resource[0] = 1;
+        assert_eq!(
+            buffer_records(&View::Placed(true, resource, placed)),
+            Some(52)
+        );
+        placed[10] = 0;
+        assert_eq!(
+            buffer_records(&View::Placed(true, resource, placed)),
+            Some(0)
+        );
+        resource[0] = 3;
+        assert_eq!(buffer_records(&View::Placed(false, resource, placed)), None);
     }
 
     /// A null 3D UAV made on the real device leaves it alive.

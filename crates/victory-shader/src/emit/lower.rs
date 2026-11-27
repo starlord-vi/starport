@@ -6256,17 +6256,23 @@ impl<'a> Lower<'a> {
                 self.stale.extend(inst.writes.iter().map(|w| w.1));
                 return Err("a sampler's descriptor read as data");
             }
-            // A buffer view the code only takes the address of, to walk
-            // the memory behind it (a ray-tracing structure): the address
-            // from the host, the other dwords have no value.
+            // A buffer view used only as data: recover its address and
+            // NUM_RECORDS from host metadata. Keep the format word missing;
+            // no host descriptor bits may stand in for console format bits.
             if count <= 4
                 && let Some((lo, hi)) = self.view_address(site)
             {
+                let records = if count >= 3 {
+                    let src = Source::Loaded { load: site, first: 0 };
+                    let (slot, dword) = self.table_place(&src).ok_or(OTHER)?;
+                    Some(self.host_word(RootType::Other(super::shader::USER_VIEW_RECORDS), slot, dword))
+                } else { None };
                 for k in 0..count {
                     let reg = Reg::S(code + k as u8);
-                    match k {
-                        0 => self.write(inst, reg, lo, None),
-                        1 => self.write(inst, reg, hi, None),
+                    match (k, records) {
+                        (0, _) => self.write(inst, reg, lo, None),
+                        (1, _) => self.write(inst, reg, hi, None),
+                        (2, Some(records)) => self.write(inst, reg, records, None),
                         _ => {
                             if let Some(v) = inst.write(reg) {
                                 self.vals.insert(v, Val::Missing(OTHER));

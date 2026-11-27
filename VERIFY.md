@@ -579,3 +579,17 @@ flags from each emitted SFI0 feature mask, so resource-only compute does
 not require an absent sampler heap (message 1419). Both hardware debug
 regressions failed before their fixes and passed afterward. These are
 binding correctness results; they do not establish correct world lighting.
+
+Buffer descriptors read only for their validity/NUM_RECORDS field now receive
+that field from the original HLE SRV/UAV declaration. Structured and typed
+views retain element counts; raw views count bytes. Null views return zero,
+overflow is rejected, and the console format word remains unsupported rather
+than borrowing unrelated host bits. No buffer upload is required for this
+metadata. A mandatory NVIDIA dispatch regression checks zero and nonzero
+branches against CPU results.
+
+The ignored `captured_depth_reduce_shader_validates_and_creates_pipeline`
+test requires external `STARPORT_DESCRIPTOR_COUNT_FIXTURE`. The recorded
+`ceb5eb68cd99cb07` kernel now translates, validates and creates an NVIDIA PSO.
+Disassembly identifies depth/min reduction, not an RT-builder kernel. This
+fixture check does not execute the kernel with a complete game's inputs.

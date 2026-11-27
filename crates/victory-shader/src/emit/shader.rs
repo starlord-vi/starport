@@ -74,6 +74,10 @@ pub const USER_VIEW_ADDRESS: u32 = 0x101;
 /// view. Asked for every root UAV, and for the root SRVs of programs with
 /// a spilled user-data table.
 pub const USER_VIEW_BIAS: u32 = 0x103;
+/// The source buffer descriptor's NUM_RECORDS at table dword `dword`.
+/// Raw views count bytes; structured/typed views count elements. This is
+/// metadata only and does not require a resident host buffer.
+pub const USER_VIEW_RECORDS: u32 = 0x104;
 
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {

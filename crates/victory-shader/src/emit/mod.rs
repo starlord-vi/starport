@@ -99,6 +99,8 @@ pub mod validator;
 #[cfg(all(test, windows))]
 mod valu_tests;
 #[cfg(all(test, windows))]
+mod descriptor_count_tests;
+#[cfg(all(test, windows))]
 mod waterfall_tests;
 mod wave;
 #[cfg(all(test, windows))]
@@ -115,7 +117,7 @@ pub use sampler::StaticSampler;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY,
     SLOT_METADATA_PLANES, SLOT_STRIDES, SLOT_STRIDES_COUNT, SLOT_TEXTURE_SIZES, USER_DATA_SPACE,
-    USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS, set_view_heap_limit,
+    USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS, USER_VIEW_RECORDS, set_view_heap_limit,
 };
 
 /// The loop limit without an override: 2^20.
