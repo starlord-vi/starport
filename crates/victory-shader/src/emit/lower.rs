@@ -33,6 +33,9 @@ mod halves;
 #[path = "accc_ops.rs"]
 mod accc_ops;
 
+#[path = "float64.rs"]
+mod float64;
+
 type Why = &'static str;
 
 /// How an interpolation evaluates an input channel.
@@ -2201,6 +2204,7 @@ impl<'a> Lower<'a> {
     fn shape(&mut self, shape: super::wave::Shape, own: bool) -> Result<V, Why> {
         use super::wave::{Op, Shape};
         let (op, src, mask, ident, prefix) = match shape {
+            Shape::DoubleSum(src, mask, high) => return self.double_sum(src, mask, high),
             Shape::K(k) => return Ok(self.s.m.i32(k)),
             Shape::Value(v) => return self.i32_of(v),
             Shape::Active(op, src, mask, ident) => (op, src, mask, ident, None),
@@ -7295,6 +7299,9 @@ impl<'a> Lower<'a> {
     }
 
     fn valu_op(&mut self, inst: &Inst, guard: Option<V>) -> Result<(), Why> {
+        if let Some(result) = self.valu64(inst, guard) {
+            return result;
+        }
         let Fields::Valu(v) = &inst.fields else {
             unreachable!()
         };

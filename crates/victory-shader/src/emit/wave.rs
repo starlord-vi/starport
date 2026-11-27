@@ -115,6 +115,14 @@ pub(crate) enum Sym {
         ident: u32,
         lanes: u64,
     },
+    /// One dword of an exact balanced double sum; both dwords carry the
+    /// same source pair and lane set, so mixing unrelated halves is rejected.
+    DoubleSum {
+        src: (Value, Value),
+        mask: Value,
+        lanes: u64,
+        high: bool,
+    },
 }
 
 /// What a value a section leaves holds in every lane.
@@ -128,6 +136,7 @@ pub(crate) enum Shape {
     Active(Op, Value, Value, u32),
     /// `op` over the lanes below (`inclusive`: and including) each lane.
     Prefix(Op, Value, Value, u32, bool),
+    DoubleSum((Value, Value), Value, bool),
 }
 
 /// The section starting at instruction `start` of a block: its restore
@@ -399,6 +408,49 @@ fn simulate(insts: &[Inst], wave: u32, saved: Mask) -> Left {
             }
         };
         let modifiers = v.abs != 0 || v.neg != 0 || v.clamp || v.omod != 0 || v.sdwa.is_some();
+        if name == "v_add_f64" {
+            let word = |operand: Operand, high: bool| -> Vec<Sym> {
+                let operand = match operand {
+                    Operand::Vector { reg, .. } => reg
+                        .checked_add(u8::from(high))
+                        .map(|reg| Operand::Vector { reg, dwords: 1 }),
+                    Operand::Scalar { code, .. } if code < 106 => code
+                        .checked_add(u8::from(high))
+                        .map(|code| Operand::Scalar { code, dwords: 1 }),
+                    _ => None,
+                };
+                operand.map_or_else(
+                    || vec![Sym::Unknown; wave as usize],
+                    |o| lanes(&o, &vec, &uni),
+                )
+            };
+            if let (Some(Operand::Vector { reg, .. }), [a, b]) = (v.dst, &v.src[..]) {
+                let (al, ah, bl, bh) = (
+                    word(*a, false),
+                    word(*a, true),
+                    word(*b, false),
+                    word(*b, true),
+                );
+                for high in [false, true] {
+                    if let Some(dst) = reg
+                        .checked_add(u8::from(high))
+                        .and_then(|r| inst.write(Reg::V(r)))
+                    {
+                        let result = (0..wave as usize)
+                            .map(|lane| {
+                            if modifiers || v.dpp.is_some() || v.opsel != 0 || exec >> lane & 1 == 0 {
+                                    Sym::Unknown
+                                } else {
+                                    double_sum(al[lane], ah[lane], bl[lane], bh[lane], high)
+                                }
+                            })
+                            .collect();
+                        vec.insert(dst, result);
+                    }
+                }
+            }
+            continue;
+        }
         if name == "v_readlane_b32" {
             let (Some(Operand::Scalar { code, .. }), Some(src), Some(lane)) =
                 (v.dst, v.src.first(), v.src.get(1))
@@ -611,11 +663,64 @@ fn constant(inst: &Inst) -> Option<u64> {
     }
 }
 
+fn double_sum(al: Sym, ah: Sym, bl: Sym, bh: Sym, high: bool) -> Sym {
+    let pair = |lo, hi| match (lo, hi) {
+        (
+            Sym::Red {
+                op: None,
+                src: sl,
+                mask: ml,
+                ident: 0,
+                lanes: ll,
+            },
+            Sym::Red {
+                op: None,
+                src: sh,
+                mask: mh,
+                ident: 0,
+                lanes: lh,
+            },
+        ) if ml == mh && ll == lh => Some(((sl, sh), ml, ll)),
+        (
+            Sym::DoubleSum {
+                src,
+                mask,
+                lanes,
+                high: false,
+            },
+            Sym::DoubleSum {
+                src: sh,
+                mask: mh,
+                lanes: lh,
+                high: true,
+            },
+        ) if src == sh && mask == mh && lanes == lh => Some((src, mask, lanes)),
+        _ => None,
+    };
+    match (pair(al, ah), pair(bl, bh)) {
+        (Some((src, mask, a)), Some((sb, mb, b))) if src == sb && mask == mb && buddies(a, b) => {
+            Sym::DoubleSum {
+                src,
+                mask,
+                lanes: a | b,
+                high,
+            }
+        }
+        _ => Sym::Unknown,
+    }
+}
+
 fn single(s: Sym, wave: u32) -> Option<Shape> {
     let all = u64::MAX >> (64 - wave);
     match s {
         Sym::K(k) => Some(Shape::K(k)),
         Sym::Own(x) | Sym::Uni(x) => Some(Shape::Value(x)),
+        Sym::DoubleSum {
+            src,
+            mask,
+            lanes,
+            high,
+        } if lanes == all => Some(Shape::DoubleSum(src, mask, high)),
         Sym::Red {
             op: Some(op),
             src,
@@ -671,6 +776,12 @@ fn per_lane(lanes: &[Sym], all: u64) -> Option<Shape> {
     }
     if lanes.iter().all(|&s| s == first) {
         return match first {
+            Sym::DoubleSum {
+                src,
+                mask,
+                lanes,
+                high,
+            } if lanes == all => Some(Shape::DoubleSum(src, mask, high)),
             Sym::K(k) => Some(Shape::K(k)),
             Sym::Uni(x) | Sym::Own(x) => Some(Shape::Value(x)),
             Sym::Red {
@@ -766,6 +877,72 @@ pub(super) const WAVE_OR_V7_TO_S7: [u32; 20] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_tree_refuses_mixed_dwords_duplicate_lanes_and_nonbalanced_order() {
+        let (low, high, mask) = (Value(10), Value(11), Value(12));
+        let term = |lane, hi| Sym::Red {
+            op: None,
+            src: if hi { high } else { low },
+            mask,
+            ident: 0,
+            lanes: 1u64 << lane,
+        };
+        let combine = |a, b, hi| {
+            double_sum(
+                term(a, false),
+                term(a, true),
+                term(b, false),
+                term(b, true),
+                hi,
+            )
+        };
+        let left = combine(0, 1, false);
+        assert!(matches!(
+            left,
+            Sym::DoubleSum {
+                lanes: 3,
+                high: false,
+                ..
+            }
+        ));
+        assert_eq!(combine(0, 0, false), Sym::Unknown);
+        assert_eq!(combine(0, 2, false), Sym::Unknown);
+        assert_eq!(
+            double_sum(
+                term(0, false),
+                term(1, true),
+                term(1, false),
+                term(1, true),
+                false
+            ),
+            Sym::Unknown
+        );
+        assert_eq!(
+            double_sum(
+                left,
+                combine(0, 1, true),
+                combine(2, 3, true),
+                combine(2, 3, false),
+                false
+            ),
+            Sym::Unknown
+        );
+        assert!(matches!(
+            double_sum(
+                left,
+                combine(0, 1, true),
+                combine(2, 3, false),
+                combine(2, 3, true),
+                true
+            ),
+            Sym::DoubleSum {
+                lanes: 15,
+                high: true,
+                ..
+            }
+        ));
+    }
 
     const S_ENDPGM: u32 = 0xBF81_0000;
 

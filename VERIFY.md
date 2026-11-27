@@ -594,8 +594,8 @@ test requires external `STARPORT_DESCRIPTOR_COUNT_FIXTURE`. The recorded
 Disassembly identifies depth/min reduction, not an RT-builder kernel. This
 fixture check does not execute the kernel with a complete game's inputs.
 
-An exact wave-wide branch retry is also enabled for compute kernels still
-requiring Wave64 when their group contains exactly one 64-lane guest wave.
+An exact wave-wide branch retry is also enabled for compute kernels blocked
+on cross-lane work when their group contains exactly one 64-lane guest wave.
 The existing branch proof and multiple-guest-wave rejection remain in place.
 `VICTORY_WAVE_WIDE=0` disables it for A/B; no global WaveSize clamp is used.
 The recorded `369cbe906ea72764` culling kernel fails NVIDIA PSO creation
@@ -603,3 +603,25 @@ with the retry disabled and passes with it enabled, with approximate
 local-wave lowering disabled in both checks. A hardware LDS regression
 checks branch results at both sides of lane 32. This is not whole-scene
 equivalence or approval to widen the 128/1024-thread failing kernels.
+
+Double-precision `v_add_f64` and `v_cvt_f32_f64` use native DXIL double
+arithmetic and IEEE conversion. Both destination dwords retain their EXEC
+guards; unsupported literal encodings and output modifiers are refused.
+Double wave sums are accepted only after symbolic proof of matching source
+pairs, masks, disjoint lanes and the balanced addition tree. The emitted
+tree preserves addition order and explicitly exchanges both dwords across
+the two NVIDIA host waves. Partial waves and unsafe branch barriers remain
+refused. This does not implement the rest of the FP64 instruction set.
+
+Hardware/WARP arithmetic tests cover signed zeros, subnormals, infinities,
+overflow and conversion ties. A mandatory NVIDIA test compares both dwords
+of the reduction against the CPU tree at 0/1/31/32/33/63/64 participating
+lanes; symbolic tests reject mixed dwords, duplicate lanes and wrong trees.
+The ignored `captured_double_shaders_validate_and_create_nvidia_pipelines`
+test needs external `STARPORT_DOUBLE_INPUTS` and asserts all three recorded
+FP64 kernels translate, validate and create NVIDIA PSOs. Fixtures stay
+outside Git. This is pipeline acceptance, not game-image equivalence.
+
+Primary specifications: [DXIL types, casts and shader flags](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst),
+[D3D shader requirement flags](https://learn.microsoft.com/en-us/windows/win32/api/d3d11shader/nf-d3d11shader-id3d11shaderreflection-getrequiresflags)
+and [AMD RDNA2 ISA](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf).

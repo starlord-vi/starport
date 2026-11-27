@@ -15,6 +15,129 @@ use crate::{io, ir, resource, structure};
 
 const S_ENDPGM: u32 = 0xBF81_0000;
 
+#[test]
+fn double_add_and_float_conversion_execute_against_ieee_oracles() {
+    Host::new(false).expect("NVIDIA hardware required for double regression");
+    let values = [
+        0.0f64,
+        -0.0,
+        1.0,
+        -1.0,
+        1.0000000000000002,
+        16_777_217.0,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::MAX,
+        -f64::MAX,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    let cases: Vec<_> = values
+        .iter()
+        .flat_map(|&a| {
+            values.iter().map(move |&b| {
+                let (a, b) = (a.to_bits(), b.to_bits());
+                [a as u32, (a >> 32) as u32, b as u32, (b >> 32) as u32]
+            })
+        })
+        .collect();
+    for high in [false, true] {
+        let mut body = vop3(0x164, 6, sgpr(0), sgpr(2), 0).to_vec();
+        body.push(vop1(0x001, 0, vgpr(if high { 7 } else { 6 })));
+        let mut shader = build_valu_cs(&body);
+        validator::Validator::load(validator::Validator::default_path().as_deref())
+            .expect("DXIL validator required")
+            .validate(&mut shader.dxil)
+            .unwrap();
+        run_cases(&shader, &cases, |backend, _, input, got| {
+            let a = f64::from_bits(u64::from(input[0]) | u64::from(input[1]) << 32);
+            let b = f64::from_bits(u64::from(input[2]) | u64::from(input[3]) << 32);
+            let expected = a + b;
+            if !expected.is_nan() {
+                let bits = expected.to_bits();
+                assert_eq!(
+                    got,
+                    if high {
+                        (bits >> 32) as u32
+                    } else {
+                        bits as u32
+                    },
+                    "{backend}: {a:?} + {b:?}, high={high}"
+                );
+            } else if high {
+                assert_eq!(got & 0x7ff0_0000, 0x7ff0_0000);
+                assert_ne!(got & 0x000f_ffff, 0);
+            }
+        });
+    }
+    let mut shader = build_valu_cs(&[vop1(0x00f, 0, sgpr(0))]);
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("DXIL validator required")
+        .validate(&mut shader.dxil)
+        .unwrap();
+    let inputs: Vec<_> = values
+        .into_iter()
+        .chain([
+            1.0000000596046448,
+            1.000000059604645,
+            f64::from(f32::MIN_POSITIVE),
+            f64::from(f32::from_bits(1)),
+            f64::NAN,
+        ])
+        .map(|value| {
+            let bits = value.to_bits();
+            [bits as u32, (bits >> 32) as u32, 0, 0]
+        })
+        .collect();
+    run_cases(&shader, &inputs, |backend, _, input, got| {
+        let a = f64::from_bits(u64::from(input[0]) | u64::from(input[1]) << 32);
+        let expected = a as f32;
+        if expected.is_nan() {
+            assert!(f32::from_bits(got).is_nan());
+        } else {
+            assert_eq!(got, expected.to_bits(), "{backend}: convert {a:?}");
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires external STARPORT_DOUBLE_INPUTS and NVIDIA hardware"]
+fn captured_double_shaders_validate_and_create_nvidia_pipelines() {
+    let directory = std::path::PathBuf::from(std::env::var("STARPORT_DOUBLE_INPUTS").unwrap())
+        .canonicalize()
+        .unwrap();
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    assert!(
+        !directory.starts_with(repo),
+        "fixtures must remain outside Git"
+    );
+    let host = Host::new(false).expect("NVIDIA hardware required");
+    for name in ["5dc3b25986622949", "6f225b641c5b0708", "926c46bab3b86bd6"] {
+        let bytes = std::fs::read(directory.join(format!("{name}.cdxil"))).unwrap();
+        let container = crate::Container::parse(&bytes).unwrap();
+        let native =
+            crate::native_programs(container.part(crate::FourCC::DXIL).unwrap().data).unwrap();
+        eprintln!("{name}: {:?}", native[0].io);
+        let was = lower::TEST_HOST_WAVE.replace(Some(32));
+        let translated = super::translate(&bytes);
+        lower::TEST_HOST_WAVE.set(was);
+        let mut shader = translated.unwrap_or_else(|e| panic!("{name}: {e}"));
+        validator::Validator::load(validator::Validator::default_path().as_deref())
+            .expect("DXIL validator required")
+            .validate(&mut shader.dxil)
+            .unwrap();
+        host.compute_pipeline(&shader)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        eprintln!("{name}: validated and created NVIDIA pipeline");
+    }
+}
+
 /// SOP1 `s_mov_b32 sdst, src0`.
 const fn s_mov_b32(sdst: u8, src0: u8) -> u32 {
     0xBE80_0000 | (sdst as u32) << 16 | 0x03 << 8 | src0 as u32

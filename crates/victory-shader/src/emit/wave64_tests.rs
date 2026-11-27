@@ -15,6 +15,115 @@ use crate::{ShaderError, io, ir, resource, structure};
 const S_ENDPGM: u32 = 0xBF81_0000;
 
 #[test]
+fn double_wave_tree_preserves_both_dwords_across_nvidia_halves() {
+    for high in [false, true] {
+        let mut body = vec![
+            0x4A26_0000, // v19 = s0 + lane (low mantissa)
+            0x7E28_0201, // v20 = s1 (high mantissa/exponent)
+            0x7D88_0002, // below s2
+            0xBE8C_246A, // save EXEC, narrow to below
+            0xBE86_25C1, // all lanes; save the participating mask in s6:7
+            0x7E04_0280,
+            0x7E06_0280,
+            0xD501_0002,
+            0x001A_2702, // masked low
+            0xD501_0003,
+            0x001A_2903, // masked high
+        ];
+        for selector in [0xDE54_C100, 0x9360_1200, 0x0009_2400, 0xFF09_4000] {
+            let dpp = if selector == 0xFF09_4000 { 0xFA } else { 0xE9 };
+            body.extend([
+                0x7E08_0200 | dpp,
+                selector | 2,
+                0x7E0A_0200 | dpp,
+                selector | 3,
+                0xD564_0002,
+                0x0002_0504,
+            ]);
+        }
+        body.extend([
+            0xD778_0004,
+            0x0201_0102,
+            0xD778_0005,
+            0x0201_0103,
+            0xD564_0002,
+            0x0002_0504,
+            0xD760_0010,
+            0x0001_4102, // s16 = read low lane32
+            0xD760_0011,
+            0x0001_4103,
+            0xD564_0002,
+            0x0002_0410,
+            0xD760_0010,
+            0x0001_0102,
+            0xD760_0011,
+            0x0001_0103,
+            0xBEFE_0406, // restore participating EXEC
+            0x7E00_0200 | if high { 17 } else { 16 },
+            0xE070_0000,
+            0x8002_0000,
+            0xBEFE_040C,
+        ]);
+        let mut native = native(&body);
+        native.vgprs = 32;
+        let p = ir::build(&native.code, true, native.vgprs).unwrap();
+        let mut shader = lowered(&native, &p, &HashSet::new()).unwrap();
+        validator::Validator::load(validator::Validator::default_path().as_deref())
+            .expect("DXIL validator required")
+            .validate(&mut shader.dxil)
+            .unwrap();
+        let _one = super::valu_tests::ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let host = Host::new(false).expect("NVIDIA hardware required");
+        let (root, pso) = host.compute_pipeline(&shader).unwrap();
+        for below in [0, 1, 31, 32, 33, 63, 64] {
+            let inputs = [0x007f_ffff, 0x3ff0_0000, below, 0];
+            let mut tree: Vec<_> = (0..64)
+                .map(|lane| {
+                    if lane < below {
+                        f64::from_bits(u64::from(inputs[0] + lane) | u64::from(inputs[1]) << 32)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            while tree.len() > 1 {
+                tree = tree.chunks_exact(2).map(|p| p[0] + p[1]).collect();
+            }
+            let expected = tree[0].to_bits();
+            let mut data = vec![0; shader.user_data_dwords() as usize];
+            for u in &shader.user_data {
+                if u.root == RootType::Constants {
+                    data[u.index as usize] = inputs[u.dword as usize];
+                }
+            }
+            let output = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(data))],
+                        views: &[View::RawUav(1)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                output[0][0],
+                if high {
+                    (expected >> 32) as u32
+                } else {
+                    expected as u32
+                },
+                "{below} lanes, high={high}"
+            );
+        }
+    }
+}
+
+#[test]
 fn accc_reduction_read_from_last_lane_after_exec_restore_includes_both_halves() {
     let mut body = vec![0x7E0A0281, 0x2C0C0081, 0x340E0B06];
     let mut tree = super::wave::WAVE_OR_V7_TO_S7[..17].to_vec();

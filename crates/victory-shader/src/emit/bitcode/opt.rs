@@ -65,6 +65,8 @@ pub(crate) struct Usage {
     pub wave_ops: bool,
     /// A 64-bit integer, as a result or an operand.
     pub int64: bool,
+    /// Double-precision floating-point data.
+    pub double: bool,
     /// A typed load of several components from a UAV.
     pub typed_uav_loads: bool,
     /// A handle from the view heap.
@@ -997,6 +999,10 @@ impl Module {
                 let inst = &self.insts[i as usize];
                 u.int64 |= wide(inst.ty);
                 for_each_operand(&inst.op, |v| u.int64 |= wide(self.type_of(v)));
+                u.double |= matches!(self.types[inst.ty.0 as usize], TypeDef::Double);
+                for_each_operand(&inst.op, |v| {
+                    u.double |= matches!(self.types[self.type_of(v).0 as usize], TypeDef::Double);
+                });
                 let Op::Call(f, args) = &inst.op else {
                     continue;
                 };

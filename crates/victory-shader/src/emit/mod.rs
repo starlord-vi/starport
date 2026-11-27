@@ -390,18 +390,12 @@ pub fn emit(
         // opt-in for other kernels after historical particle-program timeouts;
         // the default retry below is limited to one guest wave per group.
         let wide_option = std::env::var_os("VICTORY_WAVE_WIDE");
-        // ACCC polling/reduction kernels and LDS kernels still requesting
-        // Wave64 can use this exact retry when the group is one guest wave.
+        // Polling/reduction and LDS kernels can use this exact retry when
+        // their group is one guest wave.
         // Both host halves must take the scalar loop together. widen() only
         // widens branches with a proved wave-any/all meaning and refuses
         // groups containing several guest waves, which could deadlock.
-        let accc_wave = c.part(FourCC::ACCC).is_some()
-            && matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64)
-            && matches!(&original, Err(ShaderError::Unsupported { what, .. })
-                if *what == "a lane mask exchanged where not every lane runs");
-        let one_wave_lds = matches!(&original, Ok((_, Some(64))))
-            && one_guest_wave(native);
-        let wide_on = wide_option.as_ref().map_or(accc_wave || one_wave_lds, |v| v == "1");
+        let wide_on = wide_option.as_ref().map_or(one_guest_wave(native), |v| v == "1");
         // exact first: each host wave on its own where that is exact (the idiom, every
         // form; no barriers), then the other exact forms; then approximate
         for exact in [true, false] {
